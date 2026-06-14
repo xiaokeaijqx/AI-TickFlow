@@ -493,31 +493,30 @@ const createStore = () => {
             return;
           }
         }
+
+        // Mark as handled even with no matches — burns the prompt template text
+        // so getStatusFromLog won't false-trigger 'idle' from the unactionable marker
+        handledBatchCompletedIndex = batchCompletedIndex;
       }
 
       if (batchCompletedHandled) {
         state = { ...state, agentLog: newLog };
       } else {
-        // When agent goes idle while executing in batch mode, clean up stale batch state
+        // In batch mode, completion is handled exclusively by the
+        // BATCH_COMPLETED path above — never auto-clean from status detection
         const isBatchMode = state.runningBatchId && state.batches.length > 0;
-        const needsBatchCleanup = isFinished && isBatchMode;
+        const effectiveIsFinished = isFinished && !isBatchMode;
 
         state = {
           ...state,
           projectBinding: result.binding,
           agentLog: newLog,
-          agentStatus: nextStatus,
+          agentStatus: isBatchMode ? 'running' : nextStatus,
           agentError: null,
-          isExecuting: isFinished ? false : state.isExecuting,
-          currentRunId: isFinished ? null : state.currentRunId,
-          snapshotTasks: isFinished ? [] : state.snapshotTasks,
-          currentTaskIndex: isFinished ? -1 : state.currentTaskIndex,
-          // Clean up batch state when agent goes idle mid-batch (safety net)
-          ...(needsBatchCleanup ? {
-            runningBatchId: null,
-            batches: [],
-            queuedLineNumbers: new Set<number>(),
-          } : {}),
+          isExecuting: effectiveIsFinished ? false : state.isExecuting,
+          currentRunId: effectiveIsFinished ? null : state.currentRunId,
+          snapshotTasks: effectiveIsFinished ? [] : state.snapshotTasks,
+          currentTaskIndex: effectiveIsFinished ? -1 : state.currentTaskIndex,
         };
       }
       notify();

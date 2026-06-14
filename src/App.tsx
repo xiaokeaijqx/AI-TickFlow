@@ -245,8 +245,8 @@ export default function App() {
             </div>
           )}
 
-          {/* Execute button with selection count */}
-          {!store.isExecuting && incompleteCount > 0 && (
+          {/* Execute button — always visible when there are incomplete tasks */}
+          {incompleteCount > 0 && (
             <button
               onClick={() => store.createBatch()}
               disabled={selectedCount === 0}
