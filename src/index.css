@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: 0;
+  -webkit-app-region: no-drag;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.tick-glass {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.992) 0%, rgba(248, 249, 251, 0.99) 100%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-radius: 14px;
+  border: 0.5px solid rgba(170, 176, 188, 0.34);
+  box-shadow:
+    0 18px 38px rgba(32, 38, 50, 0.11),
+    inset 0 1px 0 rgba(255, 255, 255, 0.98);
+}
+
+/* Drag region */
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0);
+  border-radius: 999px;
+  transition: background 300ms ease;
+}
+
+.scrollable:hover::-webkit-scrollbar-thumb,
+.scrollable:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.12);
+}
+
+.terminal-log.scrollable:hover::-webkit-scrollbar-thumb,
+.terminal-log.scrollable:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(226, 232, 240, 0.28);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.terminal-log::-webkit-scrollbar-thumb:hover {
+  background: rgba(226, 232, 240, 0.42);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid rgba(13, 148, 136, 0.38);
+  outline-offset: 2px;
+}
+
+.tick-clean-input:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: rgba(13, 148, 136, 0.18);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

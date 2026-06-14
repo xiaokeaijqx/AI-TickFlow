@@ -1,0 +1,16 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend overview: component patterns, hooks, directory structure conventions"}
+{"file": ".trellis/spec/frontend/components.md", "reason": "React component patterns and conventions"}
+{"file": ".trellis/spec/frontend/hooks.md", "reason": "Custom hooks patterns for state and side effects"}
+{"file": ".trellis/spec/frontend/state-management.md", "reason": "Zustand store patterns for task state management"}
+{"file": ".trellis/spec/frontend/ipc-electron.md", "reason": "Electron IPC patterns for main-renderer communication"}
+{"file": ".trellis/spec/frontend/electron-browser-api-restrictions.md", "reason": "Electron security constraints and browser API limitations"}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Frontend directory layout conventions"}
+{"file": ".trellis/spec/frontend/css-design.md", "reason": "CSS/TailwindCSS design conventions"}
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend overview and conventions"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Backend directory layout for Electron main process"}
+{"file": ".trellis/spec/backend/macos-permissions.md", "reason": "macOS permission requirements for file access and accessibility"}
+{"file": ".trellis/spec/shared/typescript.md", "reason": "TypeScript strict mode conventions and type patterns"}
+{"file": ".trellis/spec/shared/code-quality.md", "reason": "Code quality standards applicable across layers"}
+{"file": ".trellis/spec/shared/pnpm-electron-setup.md", "reason": "Electron project setup with pnpm"}
+{"file": ".trellis/spec/big-question/global-keyboard-hooks.md", "reason": "Global keyboard shortcut patterns in Electron"}
+{"file": ".trellis/spec/big-question/native-module-complex-deps.md", "reason": "Native module handling for chokidar file watcher"}

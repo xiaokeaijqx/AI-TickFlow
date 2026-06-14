@@ -1,0 +1,63 @@
+{
+  "name": "tickflow",
+  "version": "1.0.0",
+  "description": "Markdown Native Task Widget — AI-powered floating task manager for macOS",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && tsc -p electron/tsconfig.json",
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && tsc -p electron/tsconfig.json && electron .\"",
+    "electron:build": "tsc && vite build && tsc -p electron/tsconfig.json && electron-builder",
+    "lint": "eslint . --ext ts,tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/chokidar": "^1.7.4",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.12",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.tickflow.app",
+    "productName": "TickFlow",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg",
+      "entitlements": "entitlements.mac.plist",
+      "extendInfo": {
+        "NSBluetoothAlwaysUsageDescription": "",
+        "NSBluetoothPeripheralUsageDescription": "",
+        "NSCameraUsageDescription": "",
+        "NSMicrophoneUsageDescription": "",
+        "NSContactsUsageDescription": "",
+        "NSPhotoLibraryUsageDescription": "",
+        "NSPhotoLibraryAddUsageDescription": "",
+        "NSCalendarsUsageDescription": "",
+        "NSRemindersUsageDescription": "",
+        "NSSpeechRecognitionUsageDescription": "",
+        "NSLocationUsageDescription": "",
+        "NSLocationWhenInUseUsageDescription": ""
+      }
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ]
+  }
+}
