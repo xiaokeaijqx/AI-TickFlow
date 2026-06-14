@@ -867,6 +867,9 @@ const createStore = () => {
 
     runningLineNumbers.forEach((n) => state.queuedLineNumbers.delete(n));
 
+    // Convert to Set for O(1) lookups
+    const runningLineNumbersSet = new Set(runningLineNumbers);
+
     // Filter out completed/stopped batches
     const remainingBatches = state.batches.filter((b) => b.id !== state.runningBatchId);
 
@@ -882,11 +885,20 @@ const createStore = () => {
         ...state,
         runningBatchId: nextBatch.id,
         snapshotTasks: nextBatch.tasks.map((t) => ({ ...t })),
-        tasks: state.tasks.map((task) =>
-          nextLineNumbers.has(task.lineNumber) && !task.completed
-            ? { ...task, status: 'running' as TaskStatus }
-            : task
-        ),
+        tasks: state.tasks.map((task) => {
+          // Promote next batch tasks to running
+          if (nextLineNumbers.has(task.lineNumber) && !task.completed) {
+            return { ...task, status: 'running' as TaskStatus };
+          }
+          // Fix completed batch tasks that mergeTasks may have locked as 'running'
+          if (runningLineNumbersSet.has(task.lineNumber)) {
+            return {
+              ...task,
+              status: task.completed ? 'done' as TaskStatus : 'todo' as TaskStatus,
+            };
+          }
+          return task;
+        }),
         batches: remainingBatches,
         isExecuting: true,
         agentStatus: 'running',
@@ -895,15 +907,23 @@ const createStore = () => {
 
       void sendBatchPrompt(nextBatch);
     } else {
-      // All done
+      // All done — fix task statuses too (mergeTasks may have locked them as 'running')
+      const doneLineNumbers = runningLineNumbersSet;
       state = {
         ...state,
         runningBatchId: null,
         snapshotTasks: [],
         batches: [],
-        queuedLineNumbers: new Set(),
+        queuedLineNumbers: new Set<number>(),
         isExecuting: false,
         agentStatus: 'idle',
+        tasks: state.tasks.map((task) =>
+          doneLineNumbers.has(task.lineNumber) && task.completed
+            ? { ...task, status: 'done' as TaskStatus }
+            : doneLineNumbers.has(task.lineNumber)
+              ? { ...task, status: 'todo' as TaskStatus }
+              : task
+        ),
       };
       notify();
     }
@@ -916,8 +936,11 @@ const createStore = () => {
     return tasks.map((task) => {
       const existing = state.tasks.find((item) => item.lineNumber === task.lineNumber);
 
-      // If lineNumber is in running batch, status = 'running'
+      // If lineNumber is in running batch, respect file completion state
       if (runningLineNumbers.has(task.lineNumber)) {
+        if (task.completed) {
+          return { ...task, status: 'done' as TaskStatus };
+        }
         return { ...task, status: 'running' as TaskStatus };
       }
 
