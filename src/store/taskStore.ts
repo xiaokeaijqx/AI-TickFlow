@@ -467,19 +467,29 @@ const createStore = () => {
         const completedTitles = parseBatchCompleted(newLog);
         const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
 
-        if (runningBatch && completedTitles.length > 0) {
-          // For each parsed title, find matching task in running batch and write status
+        if (runningBatch) {
           const writePromises: Promise<void>[] = [];
-          runningBatch.tasks.forEach((batchTask) => {
-            const matched = completedTitles.some(
-              (title) => title.toLowerCase().trim() === batchTask.title.toLowerCase().trim()
-            );
-            if (matched) {
-              writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
-            }
-          });
 
-          // Only advance if at least one task was actually matched
+          if (completedTitles.length > 0) {
+            // Try to match parsed titles to batch tasks
+            runningBatch.tasks.forEach((batchTask) => {
+              const matched = completedTitles.some(
+                (title) => title.toLowerCase().trim() === batchTask.title.toLowerCase().trim()
+              );
+              if (matched) {
+                writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
+              }
+            });
+          }
+
+          // If no matches but AI explicitly declared BATCH_COMPLETED,
+          // trust the AI and complete ALL running batch tasks.
+          if (writePromises.length === 0 && runningBatch.tasks.length > 0) {
+            runningBatch.tasks.forEach((batchTask) => {
+              writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
+            });
+          }
+
           if (writePromises.length > 0) {
             batchCompletedHandled = true;
             handledBatchCompletedIndex = batchCompletedIndex;
@@ -492,11 +502,14 @@ const createStore = () => {
             notify();
             return;
           }
-        }
 
-        // Mark as handled even with no matches — burns the prompt template text
-        // so getStatusFromLog won't false-trigger 'idle' from the unactionable marker
-        handledBatchCompletedIndex = batchCompletedIndex;
+          // Only burn the index if this was the prompt template text
+          // (empty batch or no BATCH_COMPLETED from AI yet). DO NOT burn
+          // when it could be a real AI completion with unmatched titles.
+          if (runningBatch.tasks.length === 0) {
+            handledBatchCompletedIndex = batchCompletedIndex;
+          }
+        }
       }
 
       // Fallback: if all running batch tasks are already completed in file state
