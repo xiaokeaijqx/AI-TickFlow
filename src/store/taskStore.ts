@@ -467,7 +467,7 @@ const createStore = () => {
         const completedTitles = parseBatchCompleted(newLog);
         const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
 
-        if (runningBatch) {
+        if (runningBatch && runningBatch.tasks.length > 0) {
           const writePromises: Promise<void>[] = [];
 
           if (completedTitles.length > 0) {
@@ -482,18 +482,10 @@ const createStore = () => {
             });
           }
 
-          // If no matches but AI explicitly declared BATCH_COMPLETED,
-          // trust the AI and complete ALL running batch tasks.
-          if (writePromises.length === 0 && runningBatch.tasks.length > 0) {
-            runningBatch.tasks.forEach((batchTask) => {
-              writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
-            });
-          }
-
           if (writePromises.length > 0) {
+            // Matched titles → advance
             batchCompletedHandled = true;
             handledBatchCompletedIndex = batchCompletedIndex;
-
             runningBatch.status = 'completed' as Batch['status'];
             state = { ...state };
 
@@ -503,11 +495,28 @@ const createStore = () => {
             return;
           }
 
-          // Only burn the index if this was the prompt template text
-          // (empty batch or no BATCH_COMPLETED from AI yet). DO NOT burn
-          // when it could be a real AI completion with unmatched titles.
-          if (runningBatch.tasks.length === 0) {
+          // No titles matched. Two possibilities:
+          // 1) handledBatchCompletedIndex === -1: first time seeing
+          //    BATCH_COMPLETED → it's the prompt template text. Burn it.
+          // 2) handledBatchCompletedIndex !== -1: already burned the
+          //    template → this is a NEW occurrence from the AI. Trust it
+          //    even without matching titles.
+          if (handledBatchCompletedIndex === -1) {
             handledBatchCompletedIndex = batchCompletedIndex;
+          } else {
+            runningBatch.tasks.forEach((batchTask) => {
+              writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
+            });
+
+            batchCompletedHandled = true;
+            handledBatchCompletedIndex = batchCompletedIndex;
+            runningBatch.status = 'completed' as Batch['status'];
+            state = { ...state };
+
+            await Promise.all(writePromises);
+            advanceQueue();
+            notify();
+            return;
           }
         }
       }
