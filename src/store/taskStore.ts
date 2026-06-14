@@ -499,6 +499,29 @@ const createStore = () => {
         handledBatchCompletedIndex = batchCompletedIndex;
       }
 
+      // Fallback: if all running batch tasks are already completed in file state
+      // (e.g. AI output format didn't match parseBatchCompleted, or file watcher
+      // completed them before we detected BATCH_COMPLETED), auto-advance.
+      if (
+        !batchCompletedHandled &&
+        state.isExecuting &&
+        state.runningBatchId
+      ) {
+        const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
+        if (runningBatch && runningBatch.tasks.length > 0) {
+          const allCompletedInFile = runningBatch.tasks.every((bt) =>
+            state.tasks.find((t) => t.lineNumber === bt.lineNumber)?.completed
+          );
+          if (allCompletedInFile) {
+            runningBatch.status = 'completed' as Batch['status'];
+            state = { ...state };
+            advanceQueue();
+            notify();
+            return;
+          }
+        }
+      }
+
       if (batchCompletedHandled) {
         state = { ...state, agentLog: newLog };
       } else {
