@@ -130,7 +130,7 @@ export interface BatchRuntimeState {
 export interface ElectronAPI {
   selectTaskFile: () => Promise<string | null>;
   readTaskFile: (filePath: string) => Promise<TaskFileInfo>;
-  writeTaskStatus: (filePath: string, lineNumber: number, completed: boolean) => Promise<void>;
+  writeTaskStatus: (filePath: string, lineNumber: number, completed: boolean, expectedTitle?: string) => Promise<void>;
   editTaskTitle: (filePath: string, lineNumber: number, newTitle: string) => Promise<void>;
   appendTask: (filePath: string, title: string) => Promise<Task | null>;
   deleteTask: (filePath: string, lineNumber: number) => Promise<string | null>;

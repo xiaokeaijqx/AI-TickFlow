@@ -341,7 +341,7 @@ const createStore = () => {
       if (!task || task.status === 'running' || task.status === 'queued') return;
 
       const newCompleted = !task.completed;
-      await window.electronAPI.writeTaskStatus(filePath, lineNumber, newCompleted);
+      await window.electronAPI.writeTaskStatus(filePath, lineNumber, newCompleted, task.title);
 
       const newTasks: TaskWithStatus[] = state.tasks.map((item) =>
         item.lineNumber === lineNumber
@@ -531,7 +531,7 @@ const createStore = () => {
                 if (taskIndex >= 0 && taskIndex < runningBatch.tasks.length) {
                   const batchTask = runningBatch.tasks[taskIndex];
                   writePromises.push(
-                    window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true)
+                    window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true, batchTask.title)
                   );
                 }
               }

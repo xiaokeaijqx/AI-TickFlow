@@ -35,8 +35,8 @@ function invokeWithTimeout<T>(channel: string, timeoutMs: number, ...args: unkno
 const electronAPI: ElectronAPI = {
   selectTaskFile: () => invokeWithTimeout<string | null>('select-task-file', 10_000),
   readTaskFile: (filePath: string) => invokeWithTimeout('read-task-file', 10_000, filePath),
-  writeTaskStatus: (filePath: string, lineNumber: number, completed: boolean) =>
-    invokeWithTimeout<void>('write-task-status', 10_000, filePath, lineNumber, completed),
+  writeTaskStatus: (filePath: string, lineNumber: number, completed: boolean, expectedTitle?: string) =>
+    invokeWithTimeout<void>('write-task-status', 10_000, filePath, lineNumber, completed, expectedTitle),
   editTaskTitle: (filePath: string, lineNumber: number, newTitle: string) =>
     invokeWithTimeout<void>('edit-task-title', 10_000, filePath, lineNumber, newTitle),
   appendTask: (filePath: string, title: string) => invokeWithTimeout('append-task', 10_000, filePath, title),

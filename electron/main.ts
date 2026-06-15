@@ -217,21 +217,75 @@ function readTasks(filePath: string): TaskFileInfo {
   return { path: filePath, tasks: parseTasks(content) };
 }
 
-function toggleTaskStatus(filePath: string, lineNumber: number, completed: boolean): void {
+// Same task-line regex used by parseTasks: captures [ /x] state and title.
+const TASK_LINE_REGEX = /^[\s]*- \[([ x])\] (.+)$/;
+
+function toggleTaskStatus(
+  filePath: string,
+  lineNumber: number,
+  completed: boolean,
+  expectedTitle?: string
+): void {
   if (!fs.existsSync(filePath)) return;
 
+  // Read fresh so concurrent agent edits to OTHER lines are preserved.
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
 
-  if (lineNumber < 0 || lineNumber >= lines.length) return;
+  const wantedTitle = expectedTitle?.trim();
 
-  const line = lines[lineNumber];
+  // 1. Fast path: lineNumber still points at the expected task line.
+  let targetLine = -1;
+  if (lineNumber >= 0 && lineNumber < lines.length) {
+    const fastMatch = lines[lineNumber].match(TASK_LINE_REGEX);
+    if (fastMatch && (wantedTitle === undefined || fastMatch[2].trim() === wantedTitle)) {
+      targetLine = lineNumber;
+    }
+  }
+
+  // 2. Relocate by title: anchor on content, not position.
+  if (targetLine === -1 && wantedTitle !== undefined) {
+    const candidates: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(TASK_LINE_REGEX);
+      if (match && match[2].trim() === wantedTitle) {
+        candidates.push(i);
+      }
+    }
+    if (candidates.length === 1) {
+      targetLine = candidates[0];
+    } else if (candidates.length > 1) {
+      // Duplicate titles are real; pick the candidate closest to the
+      // original lineNumber (ties resolve to the lowest index).
+      targetLine = candidates.reduce((best, idx) => {
+        const bestDist = Math.abs(best - lineNumber);
+        const idxDist = Math.abs(idx - lineNumber);
+        if (idxDist < bestDist) return idx;
+        if (idxDist === bestDist) return Math.min(best, idx);
+        return best;
+      }, candidates[0]);
+    }
+  }
+
+  // 3. Legacy fallback: no title supplied, use in-range lineNumber as-is.
+  if (targetLine === -1 && wantedTitle === undefined && lineNumber >= 0 && lineNumber < lines.length) {
+    targetLine = lineNumber;
+  }
+
+  if (targetLine === -1) {
+    console.warn(
+      `toggleTaskStatus: could not locate task line for title "${expectedTitle ?? ''}" (lineNumber ${lineNumber}); skipping`
+    );
+    return;
+  }
+
+  const line = lines[targetLine];
   const newStatus = completed ? 'x' : ' ';
   const newLine = line.replace(/- \[[ x]\]/, `- [${newStatus}]`);
 
   if (newLine === line) return; // No change
 
-  lines[lineNumber] = newLine;
+  lines[targetLine] = newLine;
   fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
 }
 
@@ -1053,9 +1107,12 @@ function setupIPC() {
     return readTasks(filePath);
   });
 
-  ipcMain.handle('write-task-status', (_event, filePath: string, lineNumber: number, completed: boolean) => {
-    toggleTaskStatus(filePath, lineNumber, completed);
-  });
+  ipcMain.handle(
+    'write-task-status',
+    (_event, filePath: string, lineNumber: number, completed: boolean, expectedTitle?: string) => {
+      toggleTaskStatus(filePath, lineNumber, completed, expectedTitle);
+    }
+  );
 
   ipcMain.handle('append-task', (_event, filePath: string, title: string) => {
     return appendTaskToFile(filePath, title);
