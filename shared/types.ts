@@ -111,6 +111,7 @@ export interface ElectronAPI {
   getSystemSounds: () => Promise<string[]>;
   setNotificationSound: (sound: string) => Promise<void>;
   getNotificationSound: () => Promise<string>;
+  restartApp: () => Promise<void>;
   getDefaultFilePath: () => Promise<string>;
   setDefaultFilePath: (filePath: string) => Promise<void>;
   getShortcut: () => Promise<string>;

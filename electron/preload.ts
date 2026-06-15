@@ -66,6 +66,7 @@ const electronAPI: ElectronAPI = {
   getSystemSounds: () => invokeWithTimeout<string[]>('get-system-sounds', 5_000),
   setNotificationSound: (sound: string) => invokeWithTimeout<void>('set-notification-sound', 5_000, sound),
   getNotificationSound: () => invokeWithTimeout<string>('get-notification-sound', 5_000),
+  restartApp: () => invokeWithTimeout<void>('restart-app', 5_000),
   getDefaultFilePath: () => invokeWithTimeout<string>('get-default-file-path', 10_000),
   setDefaultFilePath: (filePath: string) => invokeWithTimeout<void>('set-default-file-path', 10_000, filePath),
   getShortcut: () => invokeWithTimeout<string>('get-shortcut', 10_000),

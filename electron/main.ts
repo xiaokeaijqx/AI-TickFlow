@@ -1196,6 +1196,11 @@ function setupIPC() {
   ipcMain.handle('set-notification-sound', (_event, sound: string) => {
     saveSettings({ notificationSound: sound });
   });
+
+  ipcMain.handle('restart-app', () => {
+    app.relaunch();
+    app.quit();
+  });
 }
 
 // ─── App Lifecycle ───────────────────────────────────────────────

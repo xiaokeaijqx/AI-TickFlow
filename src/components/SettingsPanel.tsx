@@ -234,6 +234,18 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
         </div>
 
         <div>
+          <label className="text-tick-text-dim text-xs mb-1 block">App</label>
+          <button
+            onClick={async () => {
+              await window.electronAPI.restartApp();
+            }}
+            className="w-full rounded-md border border-[#DDE1E8] bg-white px-2 py-1.5 text-xs font-medium text-tick-text transition-colors hover:bg-[#EAEAED] hover:border-[#C9CED8]"
+          >
+            Restart App
+          </button>
+        </div>
+
+        <div>
           <label className="text-tick-text-dim text-xs mb-1 block">Notification Sound</label>
           <div className="flex items-center gap-2">
             <select
