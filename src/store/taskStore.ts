@@ -95,7 +95,7 @@ function getCompletionStatus(task: Task, fallback: TaskStatus): TaskStatus {
 }
 
 function getLastLineMarkerIndex(log: string, marker: string): number {
-  const markerPattern = new RegExp(`(^|\\n)${marker}(\\r?\\n|$)`, 'g');
+  const markerPattern = new RegExp(`(^|\\n)[ \\t]*${marker}[ \\t]*(\\r?\\n|$)`, 'g');
   let lastIndex = -1;
   let match = markerPattern.exec(log);
 
@@ -114,22 +114,25 @@ function getStatusFromLog(
   handledApprovalMarkerIndex: number,
   handledBatchCompletedIndex: number
 ): AgentStatus {
+  // Strip ANSI SGR sequences so markers are detectable even when the
+  // tmux pane contains color codes (tmux capture-pane -e).
+  const cleanLog = log.replace(/\x1b\[[0-9;:]*m/g, '');
   // Both completion markers count; only count DONE N if it's been handled (not prompt text).
-  const allDoneIndexFromAll = getLastLineMarkerIndex(log, 'ALL_TASKS_COMPLETED');
+  const allDoneIndexFromAll = getLastLineMarkerIndex(cleanLog, 'ALL_TASKS_COMPLETED');
   // Use the DONE \d+ regex (not lastIndexOf) so the template's "DONE N" (letter N, not
   // a digit) doesn't cause a false match in non-batch mode.
-  const doneRegex = /^DONE (\d+)$/gm;
+  const doneRegex = /^[ \t]*DONE (\d+)[ \t]*$/gm;
   let batchIndex = -1;
   let m: RegExpExecArray | null;
-  while ((m = doneRegex.exec(log)) !== null) {
+  while ((m = doneRegex.exec(cleanLog)) !== null) {
     batchIndex = m.index;
   }
   const allDoneIndex = batchIndex > handledBatchCompletedIndex
     ? Math.max(allDoneIndexFromAll, batchIndex)
     : allDoneIndexFromAll;
-  const approvalIndex = getLastLineMarkerIndex(log, 'WAIT_APPROVAL');
-  const approvedIndex = log.lastIndexOf('继续执行');
-  const rejectedIndex = log.lastIndexOf('取消本步骤并重新规划');
+  const approvalIndex = getLastLineMarkerIndex(cleanLog, 'WAIT_APPROVAL');
+  const approvedIndex = cleanLog.lastIndexOf('继续执行');
+  const rejectedIndex = cleanLog.lastIndexOf('取消本步骤并重新规划');
   const responseIndex = Math.max(approvedIndex, rejectedIndex);
 
   if (allDoneIndex >= 0 && allDoneIndex > approvalIndex) {
@@ -489,9 +492,9 @@ const createStore = () => {
         );
         const isFinished = nextStatus === 'idle' && state.isExecuting;
 
-        // Check for DONE N markers. The regex /^DONE (\d+)$/ inherently
-        // skips the template's "DONE N" (letter N, not a digit), so no
-        // position-based burn logic is needed — just deduplicate with a Set.
+        // Check for DONE N markers. parseTaskCompletedIndices strips ANSI codes
+        // and tolerates leading indentation, so TUI-rendered "  DONE 1" is matched.
+        // The /DONE (\d+)/ regex inherently skips the template's "DONE N" (letter N).
         let taskCompletedHandled = false;
         if (state.isExecuting && state.runningBatchId) {
           const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
