@@ -542,6 +542,7 @@ function buildBatchExecutionPrompt(
 
 完成某个任务后输出：DONE N
 需确认时输出：WAIT_APPROVAL
+不要直接修改 task.md，通过上述标记报告完成状态。
 项目路径：${binding.projectPath}`;
 }
 
@@ -558,6 +559,7 @@ function buildExecutionPrompt(binding: ProjectBinding, uncheckedTasks: Task[], f
 完成某个任务后输出：DONE N
 需确认时输出：WAIT_APPROVAL
 全部完成后输出：ALL_TASKS_COMPLETED
+不要直接修改 task.md，通过上述标记报告完成状态。
 项目路径：${binding.projectPath}`;
 }
 
