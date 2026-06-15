@@ -20,7 +20,7 @@ import type {
 } from '../shared/types';
 
 const execFileAsync = promisify(execFile);
-const EXPANDED_MIN_SIZE: [number, number] = [240, 200];
+const EXPANDED_MIN_SIZE: [number, number] = [240, 300];
 const EXPANDED_MAX_SIZE: [number, number] = [600, 800];
 const COLLAPSED_SIZE = { width: 136, height: 86 };
 
@@ -98,7 +98,7 @@ let expandedWindowBounds: Rectangle | null = null;
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 320,
-    height: 420,
+    height: 520,
     minWidth: EXPANDED_MIN_SIZE[0],
     minHeight: EXPANDED_MIN_SIZE[1],
     maxWidth: EXPANDED_MAX_SIZE[0],

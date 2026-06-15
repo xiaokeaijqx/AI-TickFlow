@@ -10,7 +10,7 @@ import AgentPanel from './components/AgentPanel';
 export default function App() {
   const store = useTaskStore();
   const [fileSelected, setFileSelected] = useState(false);
-  const [agentPanelHeight, setAgentPanelHeight] = useState(200);
+  const [agentPanelHeight, setAgentPanelHeight] = useState(280);
   const [agentPanelCollapsed, setAgentPanelCollapsed] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const isResizingRef = useRef(false);
@@ -27,7 +27,7 @@ export default function App() {
       const handleMouseMove = (ev: MouseEvent) => {
         if (!isResizingRef.current) return;
         const deltaY = startYRef.current - ev.clientY;
-        const newHeight = Math.max(80, Math.min(400, startHeightRef.current + deltaY));
+        const newHeight = Math.max(80, Math.min(500, startHeightRef.current + deltaY));
         setAgentPanelHeight(newHeight);
       };
 
