@@ -509,6 +509,48 @@ prevent double-claims — never silently claim nothing.
 **General rule**: any position into `capture-pane`/scrollback output must be a
 content anchor (a string you re-find), never a stored absolute index.
 
+### Don't: write back to a shared file by positional line index alone
+
+**Problem**: `task.md` is the app's persisted task list, but it is ALSO visible
+to the coding agent (the agent's cwd is `path.dirname(taskFile)` — they are
+coupled by design). The agent, despite the prompt's "不要直接修改 task.md", edits
+it. If the app then writes a checkbox purely by stored line index, an agent
+insert/delete/reorder shifts the indices and the app flips the WRONG task.
+
+```ts
+// WRONG — blindly flips whatever is at the stale index
+function toggleTaskStatus(filePath, lineNumber, completed) {
+  const lines = read(filePath).split('\n');
+  lines[lineNumber] = lines[lineNumber].replace(/- \[[ x]\]/, completed ? '- [x]' : '- [ ]');
+  write(filePath, lines.join('\n'));      // wrong line if the file shifted under us
+}
+```
+
+Task identity is positional here (`id: \`task-${i}\``, `lineNumber: i` in
+`parseTasks`), so any external edit invalidates every stored index.
+
+**Instead**: anchor the write on the task TITLE, with graceful fallback.
+
+```ts
+// CORRECT — verify/relocate by content, positional only as last resort
+function toggleTaskStatus(filePath, lineNumber, completed, expectedTitle?) {
+  // 1. fast path: line at lineNumber still has expectedTitle
+  // 2. relocate: scan for a task line whose title === expectedTitle;
+  //    on duplicate titles, pick the candidate index closest to lineNumber
+  // 3. legacy positional fallback ONLY when no expectedTitle was passed
+  // not found => no-op + warn (never flip a wrong line)
+}
+```
+
+Read the file FRESH inside the write (read-modify-write) so concurrent agent
+edits to OTHER lines survive. The app stays the resilient single source of
+truth for checkbox state without depending on the agent obeying instructions.
+
+> **Note**: renaming the file (e.g. `task.md` → `tick_task.md`) does NOT solve
+> this — the file is still in the agent's cwd and still looks like a checklist.
+> Resilient content-anchored writes are the real fix; isolating the file outside
+> the agent's project path is the only thing that truly stops the agent seeing it.
+
 **Fire-and-forget**: persist writes use `void window.electronAPI.setBatchRuntime(...)`
 (matches the store's existing `void`-prefixed IPC style); never block a state
 transition on the persist round-trip.
