@@ -5,6 +5,7 @@ import type {
   AgentStatus,
   ApprovalDecision,
   Batch,
+  BatchRuntimeState,
   ProjectBinding,
   Task,
   TaskStatus,
@@ -84,6 +85,10 @@ export interface TaskStore {
   clearEmptySelectionMessage: () => void;
   getRunningBatch: () => Batch | undefined;
   getQueuedBatches: () => Batch[];
+
+  // Batch runtime persistence
+  persistBatchRuntime: () => void;
+  restoreBatchRuntime: () => Promise<void>;
 }
 
 function getIncompleteCount(tasks: Task[]): number {
@@ -562,6 +567,7 @@ const createStore = () => {
 
                 const refreshed = await window.electronAPI.refreshTasks(filePath);
                 state = { ...state, tasks: mergeTasks(refreshed.tasks) };
+                persistRuntime();
                 notify();
                 return;
               }
@@ -900,6 +906,7 @@ const createStore = () => {
         await sendBatchPrompt(batch);
       } else {
         notify();
+        persistRuntime();
       }
     },
 
@@ -951,6 +958,7 @@ const createStore = () => {
         queuedLineNumbers: newQueuedLineNumbers,
       };
       notify();
+      persistRuntime();
     },
 
     cancelQueuedTask: (lineNumber: number) => {
@@ -995,6 +1003,7 @@ const createStore = () => {
       }
 
       notify();
+      persistRuntime();
     },
 
     clearCompletedTasks: async () => {
@@ -1011,6 +1020,41 @@ const createStore = () => {
 
     getQueuedBatches: () => {
       return state.batches.filter((b) => b.status === 'queued');
+    },
+
+    persistBatchRuntime: () => {
+      persistRuntime();
+    },
+
+    restoreBatchRuntime: async () => {
+      const filePath = state.filePath;
+      if (!filePath) return;
+
+      const runtime = await window.electronAPI.getBatchRuntime(filePath);
+      if (!runtime) return;
+
+      doneParseBaseline = runtime.doneParseBaseline;
+      completedTaskIndices = new Set(runtime.completedTaskIndices);
+      handledApprovalMarkerIndex = runtime.handledApprovalMarkerIndex;
+      handledBatchCompletedIndex = runtime.handledBatchCompletedIndex;
+
+      state = {
+        ...state,
+        batches: runtime.batches,
+        runningBatchId: runtime.runningBatchId,
+        queuedLineNumbers: new Set(runtime.queuedLineNumbers),
+        nextBatchNumber: runtime.nextBatchNumber,
+        isExecuting: runtime.isExecuting,
+        snapshotTasks: runtime.snapshotTasks,
+        currentTaskIndex: runtime.currentTaskIndex,
+        currentRunId: runtime.currentRunId,
+        agentStatus: runtime.isExecuting ? 'running' : state.agentStatus,
+      };
+      // Re-merge existing tasks against the restored batch state so task rows
+      // reflect running/queued status immediately (setTasks ran before restore
+      // with empty batch state, marking everything todo/done).
+      state = { ...state, tasks: mergeTasks(state.tasks) };
+      notify();
     },
   };
 
@@ -1060,6 +1104,7 @@ const createStore = () => {
       // Reset per-batch dedup tracking. doneParseBaseline (set above) ensures
       // only DONE markers emitted after this batch started are considered.
       completedTaskIndices = new Set();
+      persistRuntime();
     } catch (error) {
       console.error('sendBatchPrompt failed:', error);
       state = {
@@ -1152,6 +1197,9 @@ const createStore = () => {
       // Stop the stall watchdog since there are no more batches
       void window.electronAPI.stopStallWatchdog();
 
+      // Persist the cleared runtime so a restart doesn't resurrect a finished batch.
+      persistRuntime();
+
       // Trigger completion notification if all tasks done
       if (state.tasks.length > 0 && state.tasks.every((t) => t.completed)) {
         void window.electronAPI.notifyComplete();
@@ -1195,6 +1243,28 @@ const createStore = () => {
 
   function notify(): void {
     listeners.forEach((listener) => listener());
+  }
+
+  function persistRuntime(): void {
+    const filePath = state.filePath;
+    if (!filePath) return;
+
+    const snapshot: BatchRuntimeState = {
+      batches: state.batches,
+      runningBatchId: state.runningBatchId,
+      queuedLineNumbers: Array.from(state.queuedLineNumbers),
+      nextBatchNumber: state.nextBatchNumber,
+      isExecuting: state.isExecuting,
+      snapshotTasks: state.snapshotTasks,
+      currentTaskIndex: state.currentTaskIndex,
+      currentRunId: state.currentRunId,
+      doneParseBaseline,
+      completedTaskIndices: Array.from(completedTaskIndices),
+      handledApprovalMarkerIndex,
+      handledBatchCompletedIndex,
+    };
+
+    void window.electronAPI.setBatchRuntime(filePath, snapshot);
   }
 
   return {

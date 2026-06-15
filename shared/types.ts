@@ -86,6 +86,21 @@ export interface AgentConfig {
   showTerminalControls: boolean;
 }
 
+export interface BatchRuntimeState {
+  batches: Batch[];
+  runningBatchId: string | null;
+  queuedLineNumbers: number[];
+  nextBatchNumber: number;
+  isExecuting: boolean;
+  snapshotTasks: Task[];
+  currentTaskIndex: number;
+  currentRunId: string | null;
+  doneParseBaseline: number;
+  completedTaskIndices: number[];
+  handledApprovalMarkerIndex: number;
+  handledBatchCompletedIndex: number;
+}
+
 export interface ElectronAPI {
   selectTaskFile: () => Promise<string | null>;
   readTaskFile: (filePath: string) => Promise<TaskFileInfo>;
@@ -123,6 +138,8 @@ export interface ElectronAPI {
   resetStallTimer: () => Promise<void>;
   stopStallWatchdog: () => Promise<void>;
   stopIdleAgent: (filePath: string) => Promise<void>;
+  getBatchRuntime: (filePath: string) => Promise<BatchRuntimeState | null>;
+  setBatchRuntime: (filePath: string, state: BatchRuntimeState) => Promise<void>;
 }
 
 declare global {

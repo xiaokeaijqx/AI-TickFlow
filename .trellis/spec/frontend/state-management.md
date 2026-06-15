@@ -413,6 +413,67 @@ export function useTabs(): TabsContextValue {
 
 ---
 
+## Persist In-Flight Runtime State That Drives External Side Effects
+
+> **Warning**: Any in-memory state that gates a polling loop or drives an
+> irreversible side effect (writing a file, marking a task done, sending a
+> command) MUST be persisted and restored on startup. Renderer memory is wiped
+> by app restart, the in-app Restart button, AND Vite HMR — silently. If the
+> only copy of "what work is in flight" lives in a store closure, a reload
+> orphans that work forever.
+
+**Symptom that reveals this bug class**: an external agent/process reports
+completion (e.g. prints `DONE N` into a tmux pane), the polling loop is
+*supposed* to detect it and write the result to disk, but after a restart the
+marker is never claimed — the file never updates and the UI never reflects it.
+
+**Root cause**: the claim logic was gated on volatile state
+(`state.isExecuting && state.runningBatchId`) plus closure variables
+(`doneParseBaseline`, `completedTaskIndices`, `handled*MarkerIndex`). None of it
+survived a reload, so the gate was permanently closed for pre-reload markers.
+
+### Rule
+
+For a custom external store (`useSyncExternalStore` + closure), split state into:
+
+| Bucket | Examples (TickFlow batch queue) | Persist? |
+| ------ | ------------------------------- | -------- |
+| **In-flight runtime** (gates side effects / polling) | `batches`, `runningBatchId`, `queuedLineNumbers`, `nextBatchNumber`, `isExecuting`, `snapshotTasks`, `currentTaskIndex`, `currentRunId`, and closure vars `doneParseBaseline`, `completedTaskIndices`, `handledApprovalMarkerIndex`, `handledBatchCompletedIndex` | **Yes** — per resolved `filePath`, via main-process settings IPC |
+| **Transient UI** | `selectedLineNumbers` (pre-submit selection), `emptySelectionMessage` | No |
+| **Derived / re-fetchable** | `tasks` (re-read from file), `agentLog` (re-captured from pane) | No |
+
+### Implementation contract
+
+1. **Wire format uses arrays, not `Set`** — the snapshot is JSON-serialized into
+   `tickflow-settings.json`. Convert `Set → Array.from(...)` on persist and
+   `Array → new Set(...)` on restore. A `Set` that survives structured-clone IPC
+   will still be dropped by the JSON settings file. Every consumer that calls
+   `.has()`/`.add()` after restore must receive a real `Set`.
+2. **Persist at every mutation site** — define one internal `persistRuntime()`
+   inside the store closure (so it can read both closure vars and `state`) and
+   call it from *every* batch-state transition: `createBatch`, `sendBatchPrompt`,
+   the `refreshAgentLog` claim path, `advanceQueue` (both promote-next AND
+   all-done branches), `stopCurrentBatch`, `cancelQueuedBatch`,
+   `cancelQueuedTask`. A missing call = silent data loss on the next reload.
+3. **Persist the CLEARED state on completion** — the all-done branch must write
+   the empty runtime, otherwise a restart resurrects a finished batch and
+   re-runs/re-marks tasks.
+4. **Restore before the polling effect starts** — call `restoreBatchRuntime()`
+   after `ensureAgentSession()` and *before* `setFileSelected(true)` (the poll
+   effect is gated on `fileSelected`). Then fire one immediate
+   `refreshAgentLog()` so leftover markers are claimed at once instead of after
+   the 1s tick. Apply in BOTH the default-path `init()` and `handleSelectFile`.
+5. **Dedup must be identity-based, not offset-based** — restored
+   `completedTaskIndices` (the set of already-claimed indices) prevents
+   double-claiming. Do not rely on the char-offset baseline alone for dedup; the
+   re-captured scrollback offset may drift.
+
+**Fire-and-forget**: persist writes use `void window.electronAPI.setBatchRuntime(...)`
+(matches the store's existing `void`-prefixed IPC style); never block a state
+transition on the persist round-trip.
+
+---
+
 ## State Organization Summary
 
 | State Type           | Where to Store           | Persistence                              |
@@ -421,6 +482,7 @@ export function useTabs(): TabsContextValue {
 | UI layout (sidebars) | `LayoutContext`          | `localStorage`                           |
 | User preferences     | `AppPreferencesContext`  | `localStorage`                           |
 | Navigation/Tabs      | `TabsContext`            | None (or `localStorage` for tab history) |
+| In-flight runtime (drives side effects) | Custom store + main-process settings IPC | **Per-filePath in settings JSON** (Set→array) |
 | Page-level UI        | Component state (lifted) | None                                     |
 | Form inputs          | Component state          | None                                     |
 

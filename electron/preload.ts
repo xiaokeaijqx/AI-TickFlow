@@ -4,6 +4,7 @@ import type {
   AgentControlKey,
   ApprovalDecision,
   BatchExecutionResult,
+  BatchRuntimeState,
   ElectronAPI,
   Task,
 } from '../shared/types';
@@ -86,6 +87,9 @@ const electronAPI: ElectronAPI = {
   resetStallTimer: () => invokeWithTimeout<void>('reset-stall-timer', 10_000),
   stopStallWatchdog: () => invokeWithTimeout<void>('stop-stall-watchdog', 10_000),
   stopIdleAgent: (filePath: string) => invokeWithTimeout<void>('stop-idle-agent', 10_000, filePath),
+  getBatchRuntime: (filePath: string) => invokeWithTimeout('get-batch-runtime', 10_000, filePath),
+  setBatchRuntime: (filePath: string, state: BatchRuntimeState) =>
+    invokeWithTimeout<void>('set-batch-runtime', 10_000, filePath, state),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

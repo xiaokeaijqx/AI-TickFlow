@@ -14,6 +14,7 @@ import type {
   AgentSessionResult,
   ApprovalDecision,
   BatchExecutionResult,
+  BatchRuntimeState,
   ProjectBinding,
   Task,
   TaskFileInfo,
@@ -32,6 +33,7 @@ type AppSettings = {
   shortcut: string;
   agentConfig: AgentConfig;
   notificationSound: string;
+  batchRuntime: Record<string, BatchRuntimeState>;
 };
 
 const DEFAULT_AGENT_CONFIG: AgentConfig = {
@@ -64,6 +66,7 @@ function loadSettings(): AppSettings {
     shortcut: 'Cmd+Shift+T',
     agentConfig: DEFAULT_AGENT_CONFIG,
     notificationSound: 'Glass.aiff',
+    batchRuntime: {},
   };
 
   try {
@@ -74,6 +77,10 @@ function loadSettings(): AppSettings {
         shortcut: typeof rawSettings.shortcut === 'string' ? rawSettings.shortcut : defaults.shortcut,
         agentConfig: normalizeAgentConfig(rawSettings.agentConfig),
         notificationSound: typeof rawSettings.notificationSound === 'string' ? rawSettings.notificationSound : defaults.notificationSound,
+        batchRuntime:
+          typeof rawSettings.batchRuntime === 'object' && rawSettings.batchRuntime !== null
+            ? rawSettings.batchRuntime
+            : defaults.batchRuntime,
       };
     }
   } catch (error) {
@@ -1125,6 +1132,17 @@ function setupIPC() {
   ipcMain.handle('set-shortcut', (_event, shortcut: string) => {
     saveSettings({ shortcut });
     registerShortcut(shortcut);
+  });
+
+  ipcMain.handle('get-batch-runtime', (_event, filePath: string) => {
+    const key = path.resolve(filePath);
+    return loadSettings().batchRuntime[key] ?? null;
+  });
+
+  ipcMain.handle('set-batch-runtime', (_event, filePath: string, runtime: BatchRuntimeState) => {
+    const key = path.resolve(filePath);
+    const current = loadSettings();
+    saveSettings({ batchRuntime: { ...current.batchRuntime, [key]: runtime } });
   });
 
   ipcMain.handle('refresh-tasks', (_event, filePath: string) => {

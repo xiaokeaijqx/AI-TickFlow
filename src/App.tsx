@@ -53,6 +53,8 @@ export default function App() {
         store.setTasks(result.tasks);
         await store.loadProjectBinding();
         void store.ensureAgentSession();
+        await store.restoreBatchRuntime();
+        void store.refreshAgentLog();
         setFileSelected(true);
       }
     }
@@ -101,6 +103,8 @@ export default function App() {
       store.setTasks(result.tasks);
       await store.loadProjectBinding();
       void store.ensureAgentSession();
+      await store.restoreBatchRuntime();
+      void store.refreshAgentLog();
       setFileSelected(true);
     }
   };
