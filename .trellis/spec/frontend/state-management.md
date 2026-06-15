@@ -468,6 +468,47 @@ For a custom external store (`useSyncExternalStore` + closure), split state into
    double-claiming. Do not rely on the char-offset baseline alone for dedup; the
    re-captured scrollback offset may drift.
 
+### Don't: anchor parsing on an absolute char offset into a sliding capture window
+
+**Problem**: The agent log is captured with `tmux capture-pane -S -2000` — the
+last 2000 lines, a SLIDING window. Code recorded `doneParseBaseline` = the
+char length of the stripped log at batch-send time, then ignored any `DONE N`
+marker at `match.index <= doneParseBaseline`.
+
+```ts
+// WRONG — offset is not a stable anchor in a sliding window
+const baseline = strippedLog.length;          // e.g. 69589 at send time
+// ...later, on each poll:
+if (match.index <= baseline) continue;          // silently drops real markers
+```
+
+**Why it's broken**: as the agent keeps emitting output, old lines scroll off
+the TOP of the 2000-line window, so the absolute offset of any given text
+*decreases* over time. Live repro: baseline 69589, but the current batch's
+`DONE 1` later sat at offset 69525 (< baseline) → filtered out → task never
+written, UI never updated. The bug only appears after enough scrollback
+accumulates, so it passes quick manual tests and "looks correct" in review.
+
+**Instead**: embed a unique per-batch sentinel in the prompt and re-locate it on
+every poll (relative anchor, recomputed from the current capture):
+
+```ts
+// CORRECT — sentinel re-located each poll via lastIndexOf, drift-immune
+export function batchSentinel(batchId: string): string {
+  return `TICKFLOW_BATCH ${batchId}`;
+}
+const pos = cleanLog.lastIndexOf(sentinel);
+const from = pos === -1 ? -1 : pos + sentinel.length; // -1 => fall back to all
+// only claim DONE markers with match.index > from; completedTaskIndices dedups
+```
+
+If the sentinel itself scrolled off the window (`lastIndexOf` → -1), fall back
+to claiming all markers and let the identity-based `completedTaskIndices` set
+prevent double-claims — never silently claim nothing.
+
+**General rule**: any position into `capture-pane`/scrollback output must be a
+content anchor (a string you re-find), never a stored absolute index.
+
 **Fire-and-forget**: persist writes use `void window.electronAPI.setBatchRuntime(...)`
 (matches the store's existing `void`-prefixed IPC style); never block a state
 transition on the persist round-trip.
