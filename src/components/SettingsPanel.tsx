@@ -23,11 +23,26 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
   const [saved, setSaved] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [isSavingAgent, setIsSavingAgent] = useState(false);
+  const [notificationSound, setNotificationSound] = useState('Glass.aiff');
+  const [systemSounds, setSystemSounds] = useState<string[]>([]);
 
   useEffect(() => {
     window.electronAPI.getShortcut().then(setShortcut);
+    window.electronAPI.getSystemSounds().then(setSystemSounds);
+    window.electronAPI.getNotificationSound().then(setNotificationSound);
     void store.loadAgentConfig();
   }, []);
+
+  const handleNotificationSoundChange = async (sound: string) => {
+    setNotificationSound(sound);
+    await window.electronAPI.setNotificationSound(sound);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  };
+
+  const handlePreviewSound = () => {
+    void window.electronAPI.notifyComplete();
+  };
 
   useEffect(() => {
     const previous = lastSyncedAgentConfigRef.current;
@@ -216,6 +231,30 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
               className="h-4 w-4 accent-tick-accent"
             />
           </label>
+        </div>
+
+        <div>
+          <label className="text-tick-text-dim text-xs mb-1 block">Notification Sound</label>
+          <div className="flex items-center gap-2">
+            <select
+              value={notificationSound}
+              onChange={(e) => handleNotificationSoundChange(e.target.value)}
+              className="flex-1 rounded-md border border-[#DDE1E8] bg-white px-2 py-1 text-xs text-tick-text outline-none transition-colors hover:border-[#C9CED8] hover:bg-white focus:border-tick-accent/50 focus:bg-white"
+            >
+              {systemSounds.map((sound) => (
+                <option key={sound} value={sound}>
+                  {sound.replace('.aiff', '')}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handlePreviewSound}
+              className="rounded-md border border-[#DDE1E8] bg-white px-2 py-1 text-xs font-medium text-tick-text transition-colors hover:bg-[#EAEAED]"
+            >
+              ▶
+            </button>
+          </div>
         </div>
 
         <div>

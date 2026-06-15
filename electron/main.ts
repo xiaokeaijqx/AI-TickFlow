@@ -31,6 +31,7 @@ type AppSettings = {
   filePath: string;
   shortcut: string;
   agentConfig: AgentConfig;
+  notificationSound: string;
 };
 
 const DEFAULT_AGENT_CONFIG: AgentConfig = {
@@ -62,6 +63,7 @@ function loadSettings(): AppSettings {
     filePath: '',
     shortcut: 'Cmd+Shift+T',
     agentConfig: DEFAULT_AGENT_CONFIG,
+    notificationSound: 'Glass.aiff',
   };
 
   try {
@@ -71,6 +73,7 @@ function loadSettings(): AppSettings {
         filePath: typeof rawSettings.filePath === 'string' ? rawSettings.filePath : defaults.filePath,
         shortcut: typeof rawSettings.shortcut === 'string' ? rawSettings.shortcut : defaults.shortcut,
         agentConfig: normalizeAgentConfig(rawSettings.agentConfig),
+        notificationSound: typeof rawSettings.notificationSound === 'string' ? rawSettings.notificationSound : defaults.notificationSound,
       };
     }
   } catch (error) {
@@ -1166,21 +1169,32 @@ function setupIPC() {
     });
     notification.show();
 
-    // Play system sound with fallbacks
-    const sounds = [
-      '/System/Library/Sounds/Glass.aiff',
-      '/System/Library/Sounds/Pop.aiff',
-    ];
-    tryPlaySound(0);
+    const settings = loadSettings();
+    const soundPath = path.join('/System/Library/Sounds', settings.notificationSound);
+    exec(`afplay "${soundPath}"`, (error) => {
+      if (error) {
+        // Fallback to Glass if preferred sound fails
+        exec('afplay /System/Library/Sounds/Glass.aiff', () => {});
+      }
+    });
+  });
 
-    function tryPlaySound(index: number) {
-      if (index >= sounds.length) return;
-      exec(`afplay "${sounds[index]}"`, (error) => {
-        if (error && index + 1 < sounds.length) {
-          tryPlaySound(index + 1);
-        }
-      });
+  ipcMain.handle('get-system-sounds', () => {
+    try {
+      return fs.readdirSync('/System/Library/Sounds')
+        .filter((f) => f.endsWith('.aiff'))
+        .sort();
+    } catch {
+      return ['Glass.aiff', 'Pop.aiff'];
     }
+  });
+
+  ipcMain.handle('get-notification-sound', () => {
+    return loadSettings().notificationSound;
+  });
+
+  ipcMain.handle('set-notification-sound', (_event, sound: string) => {
+    saveSettings({ notificationSound: sound });
   });
 }
 
