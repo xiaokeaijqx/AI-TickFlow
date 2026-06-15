@@ -12,6 +12,7 @@ export default function App() {
   const [fileSelected, setFileSelected] = useState(false);
   const [agentPanelHeight, setAgentPanelHeight] = useState(200);
   const [agentPanelCollapsed, setAgentPanelCollapsed] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const isResizingRef = useRef(false);
   const startYRef = useRef(0);
   const startHeightRef = useRef(0);
@@ -148,12 +149,17 @@ export default function App() {
         </div>
         <div className="col-start-3 flex items-center justify-end gap-0.5 no-drag">
           <button
-            onClick={() => store.refreshTasks()}
+            onClick={async () => {
+              if (isRefreshing) return;
+              setIsRefreshing(true);
+              await store.refreshTasks();
+              setTimeout(() => setIsRefreshing(false), 600);
+            }}
             className="grid h-6 w-6 place-items-center rounded-md text-sm leading-none text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
             title="Refresh tasks"
             aria-label="Refresh tasks"
           >
-            ↻
+            <span className={isRefreshing ? 'animate-spin-once inline-block' : ''}>↻</span>
           </button>
           <button
             onClick={() => store.setShowSettings(true)}
