@@ -11,6 +11,7 @@ import type {
   TaskStatus,
   TaskWithStatus,
 } from '../../shared/types';
+import { batchSentinel } from '../../shared/types';
 import { parseTaskCompletedIndices } from '../lib/batchParser';
 
 export interface TaskStore {
@@ -509,11 +510,15 @@ const createStore = () => {
           const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
 
           if (runningBatch && runningBatch.tasks.length > 0) {
-            // Parse DONE N markers AFTER the baseline captured at batch send.
-            // This excludes stale DONE markers from previous batches that remain
-            // in the tmux scrollback. Indices are reported against the
-            // ANSI-stripped log, so the baseline must also be stripped-relative.
-            const { indices } = parseTaskCompletedIndices(newLog, doneParseBaseline);
+            // Parse DONE N markers AFTER this batch's sentinel. The sentinel is
+            // re-located in the freshly captured log on every poll, so it is
+            // immune to sliding-window offset drift (capture-pane -S -2000).
+            // runningBatchId IS the batch id, so the sentinel matches what was
+            // sent. completedTaskIndices below is the dedup safety net.
+            const { indices } = parseTaskCompletedIndices(
+              newLog,
+              batchSentinel(state.runningBatchId)
+            );
 
             // Filter to indices we haven't processed yet
             const newIndices = indices.filter((i) => !completedTaskIndices.has(i));
@@ -1077,17 +1082,20 @@ const createStore = () => {
 
     handledApprovalMarkerIndex = -1;
     handledBatchCompletedIndex = -1;
-    // Baseline = length of the current ANSI-stripped log. DONE markers at or
-    // before this offset are stale (from prior batches in tmux scrollback) and
-    // must be ignored; only markers the agent emits AFTER this point count.
-    doneParseBaseline = state.agentLog.replace(/\x1b\[[0-9;:]*m/g, '').length;
+    // doneParseBaseline is deprecated: DONE markers are now anchored on this
+    // batch's relative sentinel (batchSentinel(batch.id)) re-located each poll,
+    // which is immune to sliding-window offset drift. We still assign the field
+    // so the persisted runtime JSON shape is unchanged, but it is never used
+    // for filtering.
+    doneParseBaseline = 0;
     state = { ...state, agentStallMessage: null, lastLogChangeTimestamp: Date.now() };
     notify();
     try {
       const result = await window.electronAPI.executeBatchPrompt(
         filePath,
         batch.batchNumber,
-        batch.tasks
+        batch.tasks,
+        batch.id
       );
 
       if (!result.success) {
@@ -1101,8 +1109,8 @@ const createStore = () => {
         return;
       }
 
-      // Reset per-batch dedup tracking. doneParseBaseline (set above) ensures
-      // only DONE markers emitted after this batch started are considered.
+      // Reset per-batch dedup tracking. The batch sentinel (anchored at parse
+      // time) ensures only DONE markers emitted after this batch are claimed.
       completedTaskIndices = new Set();
       persistRuntime();
     } catch (error) {

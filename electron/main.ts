@@ -19,6 +19,7 @@ import type {
   Task,
   TaskFileInfo,
 } from '../shared/types';
+import { batchSentinel } from '../shared/types';
 
 const execFileAsync = promisify(execFile);
 const EXPANDED_MIN_SIZE: [number, number] = [240, 300];
@@ -542,13 +543,18 @@ function resetStallTimer(): void {
 function buildBatchExecutionPrompt(
   binding: ProjectBinding,
   batchNumber: number,
-  batchTasks: Task[]
+  batchTasks: Task[],
+  batchId: string
 ): string {
   const taskLines = batchTasks
     .map((task, index) => `[${index + 1}] ${task.title}`)
     .join('\n');
 
-  return `${taskLines}
+  // Sentinel anchors DONE-marker parsing relative to this batch (see
+  // batchSentinel docs). It is echoed back into the capture; the parser
+  // re-locates it each poll, so it survives sliding-window offset drift.
+  return `${batchSentinel(batchId)}
+${taskLines}
 
 完成某个任务后输出：DONE N
 需确认时输出：WAIT_APPROVAL
@@ -689,7 +695,8 @@ async function executeAgentTasks(filePath: string, focusedTask?: Task): Promise<
 async function executeBatchPrompt(
   filePath: string,
   batchNumber: number,
-  batchTasks: Task[]
+  batchTasks: Task[],
+  batchId: string
 ): Promise<BatchExecutionResult> {
   const sessionResult = await ensureAgentSession(filePath);
   if (!sessionResult.success) {
@@ -714,7 +721,7 @@ async function executeBatchPrompt(
         sentAt: Date.now(),
       };
     }
-    const prompt = buildBatchExecutionPrompt(sessionResult.binding, batchNumber, batchTasks);
+    const prompt = buildBatchExecutionPrompt(sessionResult.binding, batchNumber, batchTasks, batchId);
     await pastePrompt(sessionResult.binding.tmuxSession, prompt);
 
     startStallWatchdog(sessionResult.binding.tmuxSession);
@@ -722,7 +729,7 @@ async function executeBatchPrompt(
     return {
       success: true,
       binding: sessionResult.binding,
-      batchId: `batch_${batchNumber}`,
+      batchId,
       batchNumber,
       taskCount: batchTasks.length,
       sentAt: Date.now(),
@@ -1096,8 +1103,8 @@ function setupIPC() {
     return await stopAgent(filePath);
   });
 
-  ipcMain.handle('execute-batch-prompt', async (_event, filePath: string, batchNumber: number, batchTasks: Task[]) => {
-    return await executeBatchPrompt(filePath, batchNumber, batchTasks);
+  ipcMain.handle('execute-batch-prompt', async (_event, filePath: string, batchNumber: number, batchTasks: Task[], batchId: string) => {
+    return await executeBatchPrompt(filePath, batchNumber, batchTasks, batchId);
   });
 
   ipcMain.handle('clear-completed-tasks', async (_event, filePath: string) => {

@@ -1,5 +1,25 @@
 // Shared types between main and renderer processes
 
+/**
+ * Derive the unique, stable sentinel line embedded at the top of a batch prompt.
+ *
+ * The agent log is captured with `tmux capture-pane -S -2000`, which is a
+ * SLIDING WINDOW of the last 2000 lines. As the agent keeps emitting output,
+ * old lines scroll off the top, so the ABSOLUTE character offset of any given
+ * text decreases over time. Numeric offset baselines are therefore unstable.
+ *
+ * Instead, this sentinel is re-located on every poll via `lastIndexOf`, giving
+ * a RELATIVE anchor that is immune to offset drift. Only `DONE N` markers that
+ * appear textually after the sentinel in the current capture are claimed.
+ *
+ * The format is kept simple/distinctive so it survives being pasted into the
+ * agent TUI and echoed back (the parser strips ANSI and tolerates leading
+ * indentation).
+ */
+export function batchSentinel(batchId: string): string {
+  return `TICKFLOW_BATCH ${batchId}`;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -95,6 +115,12 @@ export interface BatchRuntimeState {
   snapshotTasks: Task[];
   currentTaskIndex: number;
   currentRunId: string | null;
+  /**
+   * @deprecated No longer used to filter DONE markers. Batch completion is now
+   * anchored on the relative `batchSentinel(batchId)` string (re-located each
+   * poll), because absolute char offsets drift in the sliding capture window.
+   * Field retained so older persisted settings JSON still type-checks on restore.
+   */
   doneParseBaseline: number;
   completedTaskIndices: number[];
   handledApprovalMarkerIndex: number;
@@ -120,7 +146,7 @@ export interface ElectronAPI {
   sendAgentMessage: (filePath: string, message: string) => Promise<AgentExecutionResult>;
   sendAgentKey: (filePath: string, key: AgentControlKey) => Promise<AgentExecutionResult>;
   stopAgent: (filePath: string) => Promise<AgentExecutionResult>;
-  executeBatchPrompt: (filePath: string, batchNumber: number, batchTasks: Task[]) => Promise<BatchExecutionResult>;
+  executeBatchPrompt: (filePath: string, batchNumber: number, batchTasks: Task[], batchId: string) => Promise<BatchExecutionResult>;
   clearCompletedTasks: (filePath: string) => Promise<void>;
   notifyComplete: () => Promise<void>;
   getSystemSounds: () => Promise<string[]>;

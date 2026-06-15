@@ -59,8 +59,8 @@ const electronAPI: ElectronAPI = {
   sendAgentMessage: (filePath: string, message: string) => invokeWithTimeout('send-agent-message', 10_000, filePath, message),
   sendAgentKey: (filePath: string, key: AgentControlKey) => invokeWithTimeout('send-agent-key', 10_000, filePath, key),
   stopAgent: (filePath: string) => invokeWithTimeout('stop-agent', 10_000, filePath),
-  executeBatchPrompt: (filePath: string, batchNumber: number, batchTasks: Task[]) =>
-    invokeWithTimeout('execute-batch-prompt', 30_000, filePath, batchNumber, batchTasks),
+  executeBatchPrompt: (filePath: string, batchNumber: number, batchTasks: Task[], batchId: string) =>
+    invokeWithTimeout('execute-batch-prompt', 30_000, filePath, batchNumber, batchTasks, batchId),
   clearCompletedTasks: (filePath: string) =>
     invokeWithTimeout<void>('clear-completed-tasks', 10_000, filePath),
   notifyComplete: () => invokeWithTimeout<void>('notify-complete', 10_000),
