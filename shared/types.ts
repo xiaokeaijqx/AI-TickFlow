@@ -66,7 +66,7 @@ export interface Batch {
   id: string;
   batchNumber: number;
   tasks: Task[];
-  status: 'running' | 'queued';
+  status: 'running' | 'queued' | 'completed';
   createdAt: number;
 }
 
@@ -115,6 +115,10 @@ export interface ElectronAPI {
   refreshTasks: (filePath: string) => Promise<TaskFileInfo>;
   setWindowCollapsed: (collapsed: boolean) => Promise<void>;
   onToggleWindow: (callback: () => void) => () => void;
+  onAgentIdleWarning: (callback: (message: string) => void) => () => void;
+  resetStallTimer: () => Promise<void>;
+  stopStallWatchdog: () => Promise<void>;
+  stopIdleAgent: (filePath: string) => Promise<void>;
 }
 
 declare global {

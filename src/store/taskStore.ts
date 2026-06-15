@@ -10,7 +10,7 @@ import type {
   TaskStatus,
   TaskWithStatus,
 } from '../../shared/types';
-import { hasBatchCompleted, parseBatchCompleted } from '../lib/batchParser';
+import { parseTaskCompletedIndices } from '../lib/batchParser';
 
 export interface TaskStore {
   filePath: string | null;
@@ -27,6 +27,8 @@ export interface TaskStore {
   agentStatus: AgentStatus;
   agentLog: string;
   agentError: string | null;
+  agentStallMessage: string | null;
+  lastLogChangeTimestamp: number;
 
   // Batch queue state
   selectedLineNumbers: Set<number>;
@@ -77,6 +79,7 @@ export interface TaskStore {
   createBatch: () => Promise<void>;
   stopCurrentBatch: () => Promise<void>;
   cancelQueuedBatch: (batchId: string) => void;
+  cancelQueuedTask: (lineNumber: number) => void;
   clearCompletedTasks: () => Promise<void>;
   clearEmptySelectionMessage: () => void;
   getRunningBatch: () => Batch | undefined;
@@ -111,9 +114,16 @@ function getStatusFromLog(
   handledApprovalMarkerIndex: number,
   handledBatchCompletedIndex: number
 ): AgentStatus {
-  // Both completion markers count; only count BATCH_COMPLETED if it's been handled (not prompt text)
+  // Both completion markers count; only count DONE N if it's been handled (not prompt text).
   const allDoneIndexFromAll = getLastLineMarkerIndex(log, 'ALL_TASKS_COMPLETED');
-  const batchIndex = getLastLineMarkerIndex(log, 'BATCH_COMPLETED');
+  // Use the DONE \d+ regex (not lastIndexOf) so the template's "DONE N" (letter N, not
+  // a digit) doesn't cause a false match in non-batch mode.
+  const doneRegex = /^DONE (\d+)$/gm;
+  let batchIndex = -1;
+  let m: RegExpExecArray | null;
+  while ((m = doneRegex.exec(log)) !== null) {
+    batchIndex = m.index;
+  }
   const allDoneIndex = batchIndex > handledBatchCompletedIndex
     ? Math.max(allDoneIndexFromAll, batchIndex)
     : allDoneIndexFromAll;
@@ -152,6 +162,8 @@ const createStore = () => {
   let hasNotifiedCompletion = false;
   let handledApprovalMarkerIndex = -1;
   let handledBatchCompletedIndex = -1;
+  let completedTaskIndices = new Set<number>();
+  let refreshAgentLogInFlight = false;
 
   let state: TaskStore = {
     filePath: null,
@@ -168,6 +180,8 @@ const createStore = () => {
     agentStatus: 'idle',
     agentLog: '',
     agentError: null,
+    agentStallMessage: null,
+    lastLogChangeTimestamp: 0,
 
     // Batch queue state
     selectedLineNumbers: new Set(),
@@ -187,6 +201,8 @@ const createStore = () => {
         agentStatus: 'idle',
         agentLog: '',
         agentError: null,
+        agentStallMessage: null,
+        lastLogChangeTimestamp: 0,
         isExecuting: false,
         currentRunId: null,
         snapshotTasks: [],
@@ -226,6 +242,8 @@ const createStore = () => {
           agentStatus: 'idle',
           agentLog: '',
           agentError: null,
+          agentStallMessage: null,
+          lastLogChangeTimestamp: 0,
           isExecuting: false,
           currentRunId: null,
           snapshotTasks: [],
@@ -279,18 +297,25 @@ const createStore = () => {
         hasNotifiedCompletion = false;
       }
 
+      // In batch mode, completion is handled by the DONE N
+      // detection and fallback in refreshAgentLog → advanceQueue().  Do NOT reset
+      // isExecuting here — doing so prevents advanceQueue() from cleaning up
+      // the running batch, leaving it stuck as "running" forever.
+      const isBatchMode = state.runningBatchId && state.batches.length > 0;
+      const effectiveDidCompleteAll = didCompleteAll && !isBatchMode;
+
       state = {
         ...state,
         tasks: nextTasks,
-        isExecuting: didCompleteAll ? false : state.isExecuting,
-        currentRunId: didCompleteAll ? null : state.currentRunId,
-        snapshotTasks: didCompleteAll ? [] : state.snapshotTasks,
-        currentTaskIndex: didCompleteAll ? -1 : state.currentTaskIndex,
-        agentStatus: didCompleteAll ? 'idle' : state.agentStatus,
+        isExecuting: effectiveDidCompleteAll ? false : state.isExecuting,
+        currentRunId: effectiveDidCompleteAll ? null : state.currentRunId,
+        snapshotTasks: effectiveDidCompleteAll ? [] : state.snapshotTasks,
+        currentTaskIndex: effectiveDidCompleteAll ? -1 : state.currentTaskIndex,
+        agentStatus: effectiveDidCompleteAll ? 'idle' : state.agentStatus,
       };
       notify();
 
-      if (didCompleteAll && !hasNotifiedCompletion) {
+      if (effectiveDidCompleteAll && !hasNotifiedCompletion) {
         hasNotifiedCompletion = true;
         void window.electronAPI.notifyComplete();
       }
@@ -354,31 +379,31 @@ const createStore = () => {
       const task = state.tasks.find((item) => item.lineNumber === lineNumber);
       if (!task || task.status === 'running') return;
 
-      // If task is queued, remove from its batch
+      // If task is queued, remove from its batch (immutable)
       if (task.status === 'queued') {
+        const newBatches: Batch[] = [];
+        for (const batch of state.batches) {
+          if (batch.tasks.some((t) => t.lineNumber === lineNumber)) {
+            const newTasks = batch.tasks.filter((t) => t.lineNumber !== lineNumber);
+            if (newTasks.length > 0) {
+              newBatches.push({ ...batch, tasks: newTasks });
+            }
+            // If batch becomes empty, drop it entirely
+          } else {
+            newBatches.push(batch);
+          }
+        }
+
+        const newQueuedLineNumbers = new Set(state.queuedLineNumbers);
+        newQueuedLineNumbers.delete(lineNumber);
+        const newSelectedLineNumbers = new Set(state.selectedLineNumbers);
+        newSelectedLineNumbers.delete(lineNumber);
+
         state = {
           ...state,
-          batches: state.batches.filter((batch) => {
-            if (batch.tasks.some((t) => t.lineNumber === lineNumber)) {
-              // Remove this task from the batch
-              batch.tasks = batch.tasks.filter((t) => t.lineNumber !== lineNumber);
-              // If batch becomes empty, filter it out entirely
-              if (batch.tasks.length === 0) {
-                return false;
-              }
-            }
-            return true;
-          }),
-          queuedLineNumbers: (() => {
-            const next = new Set(state.queuedLineNumbers);
-            next.delete(lineNumber);
-            return next;
-          })(),
-          selectedLineNumbers: (() => {
-            const next = new Set(state.selectedLineNumbers);
-            next.delete(lineNumber);
-            return next;
-          })(),
+          batches: newBatches,
+          queuedLineNumbers: newQueuedLineNumbers,
+          selectedLineNumbers: newSelectedLineNumbers,
         };
 
         // If no batches left, reset execution state
@@ -431,140 +456,160 @@ const createStore = () => {
     },
 
     refreshAgentLog: async () => {
+      // Prevent concurrent calls from interleaving their state updates
+      if (refreshAgentLogInFlight) return;
       const filePath = state.filePath;
       if (!filePath) return;
 
-      const result = await window.electronAPI.captureAgentLog(filePath);
-      if (!result.success) {
+      refreshAgentLogInFlight = true;
+
+      try {
+        const result = await window.electronAPI.captureAgentLog(filePath);
+        if (!result.success) {
+          state = {
+            ...state,
+            projectBinding: result.binding,
+            agentStatus: 'error',
+            agentError: result.error ?? 'Failed to read agent log',
+          };
+          notify();
+          return;
+        }
+
+        const newLog = result.log;
+        const logChanged = newLog !== state.agentLog;
+        const lastLogChangeTimestamp = logChanged ? Date.now() : state.lastLogChangeTimestamp;
+
+        const nextStatus = getStatusFromLog(
+          newLog,
+          state.isExecuting,
+          state.agentStatus,
+          handledApprovalMarkerIndex,
+          handledBatchCompletedIndex
+        );
+        const isFinished = nextStatus === 'idle' && state.isExecuting;
+
+        // Check for DONE N markers. The regex /^DONE (\d+)$/ inherently
+        // skips the template's "DONE N" (letter N, not a digit), so no
+        // position-based burn logic is needed — just deduplicate with a Set.
+        let taskCompletedHandled = false;
+        if (state.isExecuting && state.runningBatchId) {
+          const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
+
+          if (runningBatch && runningBatch.tasks.length > 0) {
+            // Parse ALL DONE N markers in the log (regex excludes template text)
+            const { indices } = parseTaskCompletedIndices(newLog, -1);
+
+            // Filter to indices we haven't processed yet
+            const newIndices = indices.filter((i) => !completedTaskIndices.has(i));
+            newIndices.forEach((i) => completedTaskIndices.add(i));
+
+            if (newIndices.length > 0) {
+              const writePromises: Promise<void>[] = [];
+
+              for (const taskIndex of newIndices) {
+                if (taskIndex >= 0 && taskIndex < runningBatch.tasks.length) {
+                  const batchTask = runningBatch.tasks[taskIndex];
+                  writePromises.push(
+                    window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true)
+                  );
+                }
+              }
+
+              if (writePromises.length > 0) {
+                taskCompletedHandled = true;
+                state = {
+                  ...state,
+                  batches: state.batches.map((b) =>
+                    b.id === state.runningBatchId
+                      ? {
+                          ...b,
+                          tasks: b.tasks.map((t, i) =>
+                            newIndices.includes(i) ? { ...t, completed: true } : t
+                          ),
+                        }
+                      : b
+                  ),
+                };
+
+                await Promise.all(writePromises);
+
+                // Check if all batch tasks are now done
+                const updatedBatch = state.batches.find((b) => b.id === state.runningBatchId);
+                if (updatedBatch && updatedBatch.tasks.every((t) => t.completed)) {
+                  const refreshed = await window.electronAPI.refreshTasks(filePath);
+                  state = {
+                    ...state,
+                    tasks: mergeTasks(refreshed.tasks),
+                    batches: state.batches.map((b) =>
+                      b.id === state.runningBatchId ? { ...b, status: 'completed' as const } : b
+                    ),
+                  };
+                  advanceQueue();
+                  notify();
+                  return;
+                }
+
+                const refreshed = await window.electronAPI.refreshTasks(filePath);
+                state = { ...state, tasks: mergeTasks(refreshed.tasks) };
+                notify();
+                return;
+              }
+            }
+
+            // Fallback: if all batch tasks are already completed in file state, auto-advance
+            if (!taskCompletedHandled) {
+              const allCompletedInFile = runningBatch.tasks.every((bt) =>
+                state.tasks.find((t) => t.lineNumber === bt.lineNumber)?.completed
+              );
+              if (allCompletedInFile) {
+                state = {
+                  ...state,
+                  batches: state.batches.map((b) =>
+                    b.id === state.runningBatchId ? { ...b, status: 'completed' as const } : b
+                  ),
+                };
+                advanceQueue();
+                notify();
+                return;
+              }
+            }
+          }
+        }
+
+        if (taskCompletedHandled) {
+          state = { ...state, agentLog: newLog, lastLogChangeTimestamp };
+        } else {
+          // In batch mode, completion is handled exclusively by the
+          // DONE N path above — never auto-clean from status detection
+          const isBatchMode = state.runningBatchId && state.batches.length > 0;
+          const effectiveIsFinished = isFinished && !isBatchMode;
+
+          state = {
+            ...state,
+            projectBinding: result.binding,
+            agentLog: newLog,
+            agentStatus: isBatchMode ? 'running' : nextStatus,
+            agentError: null,
+            lastLogChangeTimestamp,
+            isExecuting: effectiveIsFinished ? false : state.isExecuting,
+            currentRunId: effectiveIsFinished ? null : state.currentRunId,
+            snapshotTasks: effectiveIsFinished ? [] : state.snapshotTasks,
+            currentTaskIndex: effectiveIsFinished ? -1 : state.currentTaskIndex,
+          };
+        }
+        notify();
+      } catch (error) {
+        console.error('refreshAgentLog failed:', error);
         state = {
           ...state,
-          projectBinding: result.binding,
           agentStatus: 'error',
-          agentError: result.error ?? 'Failed to read agent log',
+          agentError: error instanceof Error ? error.message : 'Failed to refresh agent log',
         };
         notify();
-        return;
+      } finally {
+        refreshAgentLogInFlight = false;
       }
-
-      const newLog = result.log;
-      const nextStatus = getStatusFromLog(
-        newLog,
-        state.isExecuting,
-        state.agentStatus,
-        handledApprovalMarkerIndex,
-        handledBatchCompletedIndex
-      );
-      const isFinished = nextStatus === 'idle' && state.isExecuting;
-
-      // Check for BATCH_COMPLETED — only process new occurrences
-      const batchCompletedIndex = newLog.lastIndexOf('BATCH_COMPLETED');
-      let batchCompletedHandled = false;
-      if (
-        state.isExecuting &&
-        batchCompletedIndex > handledBatchCompletedIndex &&
-        state.runningBatchId
-      ) {
-        const completedTitles = parseBatchCompleted(newLog);
-        const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
-
-        if (runningBatch && runningBatch.tasks.length > 0) {
-          const writePromises: Promise<void>[] = [];
-
-          if (completedTitles.length > 0) {
-            // Try to match parsed titles to batch tasks
-            runningBatch.tasks.forEach((batchTask) => {
-              const matched = completedTitles.some(
-                (title) => title.toLowerCase().trim() === batchTask.title.toLowerCase().trim()
-              );
-              if (matched) {
-                writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
-              }
-            });
-          }
-
-          if (writePromises.length > 0) {
-            // Matched titles → advance
-            batchCompletedHandled = true;
-            handledBatchCompletedIndex = batchCompletedIndex;
-            runningBatch.status = 'completed' as Batch['status'];
-            state = { ...state };
-
-            await Promise.all(writePromises);
-            advanceQueue();
-            notify();
-            return;
-          }
-
-          // No titles matched. Two possibilities:
-          // 1) handledBatchCompletedIndex === -1: first time seeing
-          //    BATCH_COMPLETED → it's the prompt template text. Burn it.
-          // 2) handledBatchCompletedIndex !== -1: already burned the
-          //    template → this is a NEW occurrence from the AI. Trust it
-          //    even without matching titles.
-          if (handledBatchCompletedIndex === -1) {
-            handledBatchCompletedIndex = batchCompletedIndex;
-          } else {
-            runningBatch.tasks.forEach((batchTask) => {
-              writePromises.push(window.electronAPI.writeTaskStatus(filePath, batchTask.lineNumber, true));
-            });
-
-            batchCompletedHandled = true;
-            handledBatchCompletedIndex = batchCompletedIndex;
-            runningBatch.status = 'completed' as Batch['status'];
-            state = { ...state };
-
-            await Promise.all(writePromises);
-            advanceQueue();
-            notify();
-            return;
-          }
-        }
-      }
-
-      // Fallback: if all running batch tasks are already completed in file state
-      // (e.g. AI output format didn't match parseBatchCompleted, or file watcher
-      // completed them before we detected BATCH_COMPLETED), auto-advance.
-      if (
-        !batchCompletedHandled &&
-        state.isExecuting &&
-        state.runningBatchId
-      ) {
-        const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
-        if (runningBatch && runningBatch.tasks.length > 0) {
-          const allCompletedInFile = runningBatch.tasks.every((bt) =>
-            state.tasks.find((t) => t.lineNumber === bt.lineNumber)?.completed
-          );
-          if (allCompletedInFile) {
-            runningBatch.status = 'completed' as Batch['status'];
-            state = { ...state };
-            advanceQueue();
-            notify();
-            return;
-          }
-        }
-      }
-
-      if (batchCompletedHandled) {
-        state = { ...state, agentLog: newLog };
-      } else {
-        // In batch mode, completion is handled exclusively by the
-        // BATCH_COMPLETED path above — never auto-clean from status detection
-        const isBatchMode = state.runningBatchId && state.batches.length > 0;
-        const effectiveIsFinished = isFinished && !isBatchMode;
-
-        state = {
-          ...state,
-          projectBinding: result.binding,
-          agentLog: newLog,
-          agentStatus: isBatchMode ? 'running' : nextStatus,
-          agentError: null,
-          isExecuting: effectiveIsFinished ? false : state.isExecuting,
-          currentRunId: effectiveIsFinished ? null : state.currentRunId,
-          snapshotTasks: effectiveIsFinished ? [] : state.snapshotTasks,
-          currentTaskIndex: effectiveIsFinished ? -1 : state.currentTaskIndex,
-        };
-      }
-      notify();
     },
 
     sendApproval: async (decision: ApprovalDecision) => {
@@ -589,43 +634,67 @@ const createStore = () => {
       const trimmedMessage = message.trim();
       if (!filePath || !trimmedMessage) return false;
 
-      const result = await window.electronAPI.sendAgentMessage(filePath, trimmedMessage);
-      state = {
-        ...state,
-        projectBinding: result.binding,
-        agentStatus: result.success ? 'running' : 'error',
-        agentError: result.success ? null : result.error ?? 'Failed to send message',
-      };
-      notify();
+      try {
+        const result = await window.electronAPI.sendAgentMessage(filePath, trimmedMessage);
+        state = {
+          ...state,
+          projectBinding: result.binding,
+          agentStatus: result.success ? 'running' : 'error',
+          agentError: result.success ? null : result.error ?? 'Failed to send message',
+        };
+        notify();
 
-      if (result.success) {
-        void state.refreshAgentLog();
+        if (result.success) {
+          void state.refreshAgentLog();
+        }
+
+        return result.success;
+      } catch (error) {
+        console.error('sendAgentMessage failed:', error);
+        state = {
+          ...state,
+          agentStatus: 'error',
+          agentError: error instanceof Error ? error.message : 'Failed to send message',
+        };
+        notify();
+        return false;
       }
-
-      return result.success;
     },
 
     sendAgentKey: async (key: AgentControlKey) => {
       const filePath = state.filePath;
       if (!filePath) return false;
 
-      const result = await window.electronAPI.sendAgentKey(filePath, key);
-      state = {
-        ...state,
-        projectBinding: result.binding,
-        agentStatus: result.success ? state.agentStatus : 'error',
-        agentError: result.success ? null : result.error ?? 'Failed to send key',
-      };
-      notify();
+      try {
+        const result = await window.electronAPI.sendAgentKey(filePath, key);
+        state = {
+          ...state,
+          projectBinding: result.binding,
+          agentStatus: result.success ? state.agentStatus : 'error',
+          agentError: result.success ? null : result.error ?? 'Failed to send key',
+        };
+        notify();
 
-      if (result.success) {
-        void state.refreshAgentLog();
+        if (result.success) {
+          void state.refreshAgentLog();
+        }
+
+        return result.success;
+      } catch (error) {
+        console.error('sendAgentKey failed:', error);
+        state = {
+          ...state,
+          agentStatus: 'error',
+          agentError: error instanceof Error ? error.message : 'Failed to send key',
+        };
+        notify();
+        return false;
       }
-
-      return result.success;
     },
 
     setCollapsed: (collapsed: boolean) => {
+      // Collapsing updates state immediately so the UI feels responsive
+      // (no delay perceptible to the user).
       if (collapsed) {
         state = { ...state, collapsed };
         notify();
@@ -633,6 +702,9 @@ const createStore = () => {
         return;
       }
 
+      // Expanding waits for the window resize to complete before updating
+      // React state. This prevents a layout flash where content briefly
+      // renders at the collapsed width before the window actually resizes.
       void window.electronAPI.setWindowCollapsed(false).finally(() => {
         state = { ...state, collapsed };
         notify();
@@ -650,6 +722,8 @@ const createStore = () => {
         isExecuting: true,
         agentStatus: 'running',
         agentError: null,
+        agentStallMessage: null,
+        lastLogChangeTimestamp: Date.now(),
         currentRunId: runId,
         snapshotTasks: [task],
         currentTaskIndex: 0,
@@ -659,17 +733,29 @@ const createStore = () => {
       };
       notify();
 
-      const result = await window.electronAPI.executeWithAI(filePath, task);
-      state = {
-        ...state,
-        projectBinding: result.binding,
-        agentStatus: result.success ? (result.uncheckedCount > 0 ? 'running' : 'idle') : 'error',
-        agentError: result.success ? null : result.error ?? 'Failed to execute task',
-        isExecuting: result.success && result.uncheckedCount > 0,
-        currentRunId: result.success && result.uncheckedCount > 0 ? state.currentRunId : null,
-        snapshotTasks: result.success && result.uncheckedCount > 0 ? state.snapshotTasks : [],
-        currentTaskIndex: result.success && result.uncheckedCount > 0 ? state.currentTaskIndex : -1,
-      };
+      try {
+        const result = await window.electronAPI.executeWithAI(filePath, task);
+        state = {
+          ...state,
+          projectBinding: result.binding,
+          agentStatus: result.success ? (result.uncheckedCount > 0 ? 'running' : 'idle') : 'error',
+          agentError: result.success ? null : result.error ?? 'Failed to execute task',
+          isExecuting: result.success && result.uncheckedCount > 0,
+          currentRunId: result.success && result.uncheckedCount > 0 ? state.currentRunId : null,
+          snapshotTasks: result.success && result.uncheckedCount > 0 ? state.snapshotTasks : [],
+          currentTaskIndex: result.success && result.uncheckedCount > 0 ? state.currentTaskIndex : -1,
+        };
+      } catch (error) {
+        state = {
+          ...state,
+          isExecuting: false,
+          currentRunId: null,
+          snapshotTasks: [],
+          currentTaskIndex: -1,
+          agentStatus: 'error',
+          agentError: error instanceof Error ? error.message : 'Failed to execute task',
+        };
+      }
       notify();
     },
 
@@ -789,6 +875,8 @@ const createStore = () => {
           runningBatchId: batch.id,
           isExecuting: true,
           agentStatus: 'running',
+          agentStallMessage: null,
+          lastLogChangeTimestamp: Date.now(),
           snapshotTasks: eligibleTasks.map((t) => ({ ...t })),
           tasks: state.tasks.map((task) =>
             lineNumbers.has(task.lineNumber)
@@ -814,7 +902,9 @@ const createStore = () => {
       // Mark running batch tasks as stopped
       const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
       const runningLineNumbers = new Set(runningBatch ? runningBatch.tasks.map((t) => t.lineNumber) : []);
-      runningLineNumbers.forEach((n) => state.queuedLineNumbers.delete(n));
+
+      const newQueuedLineNumbers = new Set(state.queuedLineNumbers);
+      runningLineNumbers.forEach((n) => newQueuedLineNumbers.delete(n));
 
       state = {
         ...state,
@@ -823,7 +913,9 @@ const createStore = () => {
             ? { ...task, status: 'stopped' as TaskStatus }
             : task
         ),
-        batches: state.batches.filter((b) => b.id !== state.runningBatchId),
+        queuedLineNumbers: newQueuedLineNumbers,
+        // Keep the running batch in state.batches so advanceQueue() can
+        // find its line numbers and fix task statuses (stopped → todo).
       };
 
       advanceQueue();
@@ -848,6 +940,50 @@ const createStore = () => {
         batches: state.batches.filter((b) => b.id !== batchId),
         queuedLineNumbers: newQueuedLineNumbers,
       };
+      notify();
+    },
+
+    cancelQueuedTask: (lineNumber: number) => {
+      const task = state.tasks.find((t) => t.lineNumber === lineNumber);
+      if (!task || task.status !== 'queued') return;
+
+      // Remove from its batch (immutable)
+      const newBatches: Batch[] = [];
+      for (const batch of state.batches) {
+        if (batch.tasks.some((t) => t.lineNumber === lineNumber)) {
+          const newTasks = batch.tasks.filter((t) => t.lineNumber !== lineNumber);
+          if (newTasks.length > 0) {
+            newBatches.push({ ...batch, tasks: newTasks });
+          }
+          // If batch becomes empty, drop it entirely
+        } else {
+          newBatches.push(batch);
+        }
+      }
+
+      const newQueuedLineNumbers = new Set(state.queuedLineNumbers);
+      newQueuedLineNumbers.delete(lineNumber);
+
+      state = {
+        ...state,
+        // Set task status back to 'todo' (do NOT delete from file)
+        tasks: state.tasks.map((t) =>
+          t.lineNumber === lineNumber ? { ...t, status: 'todo' as TaskStatus } : t
+        ),
+        batches: newBatches,
+        queuedLineNumbers: newQueuedLineNumbers,
+      };
+
+      // If no batches left, reset execution state
+      if (newBatches.length === 0) {
+        state = {
+          ...state,
+          isExecuting: false,
+          snapshotTasks: [],
+          runningBatchId: null,
+        };
+      }
+
       notify();
     },
 
@@ -887,18 +1023,38 @@ const createStore = () => {
 
     handledApprovalMarkerIndex = -1;
     handledBatchCompletedIndex = -1;
-    const result = await window.electronAPI.executeBatchPrompt(
-      filePath,
-      batch.batchNumber,
-      batch.tasks
-    );
+    state = { ...state, agentStallMessage: null, lastLogChangeTimestamp: Date.now() };
+    notify();
+    try {
+      const result = await window.electronAPI.executeBatchPrompt(
+        filePath,
+        batch.batchNumber,
+        batch.tasks
+      );
 
-    if (!result.success) {
+      if (!result.success) {
+        state = {
+          ...state,
+          projectBinding: result.binding,
+          agentStatus: 'error',
+          agentError: result.error ?? 'Failed to execute batch prompt',
+        };
+        notify();
+        return;
+      }
+
+      // Reset per-batch tracking. The regex /^DONE (\d+)$/ inherently
+      // distinguishes AI output (digit) from template text (letter N),
+      // so we don't need position-based baseline capture.
+      completedTaskIndices = new Set();
+    } catch (error) {
+      console.error('sendBatchPrompt failed:', error);
       state = {
         ...state,
-        projectBinding: result.binding,
         agentStatus: 'error',
-        agentError: result.error ?? 'Failed to execute batch prompt',
+        agentError: error instanceof Error ? error.message : 'Failed to send batch prompt',
+        runningBatchId: null,
+        isExecuting: false,
       };
       notify();
     }
@@ -910,26 +1066,35 @@ const createStore = () => {
       .filter((b) => b.id === state.runningBatchId)
       .flatMap((b) => b.tasks.map((t) => t.lineNumber));
 
-    runningLineNumbers.forEach((n) => state.queuedLineNumbers.delete(n));
-
-    // Convert to Set for O(1) lookups
     const runningLineNumbersSet = new Set(runningLineNumbers);
 
-    // Filter out completed/stopped batches
-    const remainingBatches = state.batches.filter((b) => b.id !== state.runningBatchId);
+    // Build new queuedLineNumbers Set (don't mutate the existing one)
+    const newQueuedLineNumbers = new Set(state.queuedLineNumbers);
+    runningLineNumbers.forEach((n) => newQueuedLineNumbers.delete(n));
+
+    // Filter out completed/stopped batches (immutable: map to new objects)
+    const remainingBatches = state.batches
+      .filter((b) => b.id !== state.runningBatchId)
+      .map((b) => ({ ...b }));
 
     // Find next queued batch
     const nextBatch = remainingBatches.find((b) => b.status === 'queued');
 
     if (nextBatch) {
+      const runningBatch = { ...nextBatch };
       // Promote it to running
-      nextBatch.status = 'running';
-      const nextLineNumbers = new Set(nextBatch.tasks.map((t) => t.lineNumber));
+      runningBatch.status = 'running';
+      const runningIndex = remainingBatches.indexOf(nextBatch);
+      if (runningIndex !== -1) {
+        remainingBatches[runningIndex] = runningBatch;
+      }
+      const nextLineNumbers = new Set(runningBatch.tasks.map((t) => t.lineNumber));
 
       state = {
         ...state,
-        runningBatchId: nextBatch.id,
-        snapshotTasks: nextBatch.tasks.map((t) => ({ ...t })),
+        runningBatchId: runningBatch.id,
+        queuedLineNumbers: newQueuedLineNumbers,
+        snapshotTasks: runningBatch.tasks.map((t) => ({ ...t })),
         tasks: state.tasks.map((task) => {
           // Promote next batch tasks to running
           if (nextLineNumbers.has(task.lineNumber) && !task.completed) {
@@ -950,10 +1115,9 @@ const createStore = () => {
       };
       notify();
 
-      void sendBatchPrompt(nextBatch);
+      void sendBatchPrompt(runningBatch);
     } else {
       // All done — fix task statuses too (mergeTasks may have locked them as 'running')
-      const doneLineNumbers = runningLineNumbersSet;
       state = {
         ...state,
         runningBatchId: null,
@@ -963,14 +1127,22 @@ const createStore = () => {
         isExecuting: false,
         agentStatus: 'idle',
         tasks: state.tasks.map((task) =>
-          doneLineNumbers.has(task.lineNumber) && task.completed
+          runningLineNumbersSet.has(task.lineNumber) && task.completed
             ? { ...task, status: 'done' as TaskStatus }
-            : doneLineNumbers.has(task.lineNumber)
+            : runningLineNumbersSet.has(task.lineNumber)
               ? { ...task, status: 'todo' as TaskStatus }
               : task
         ),
       };
       notify();
+
+      // Stop the stall watchdog since there are no more batches
+      void window.electronAPI.stopStallWatchdog();
+
+      // Trigger completion notification if all tasks done
+      if (state.tasks.length > 0 && state.tasks.every((t) => t.completed)) {
+        void window.electronAPI.notifyComplete();
+      }
     }
   }
 

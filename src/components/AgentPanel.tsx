@@ -3,6 +3,35 @@ import type { AgentControlKey, AgentProvider, AgentStatus } from '../../shared/t
 import { compactAnsiLog, parseAnsiSgr } from '../lib/ansi';
 import { useTaskStore } from '../store/taskStore';
 
+// Direct singleton for stall state that the main process pushes into
+// (avoids requiring the store to import electron IPC types)
+let globalStallMessage: string | null = null;
+let globalStallListeners = new Set<() => void>();
+
+export function getGlobalStallMessage(): string | null {
+  return globalStallMessage;
+}
+
+export function subscribeGlobalStall(listener: () => void): () => void {
+  globalStallListeners.add(listener);
+  return () => {
+    globalStallListeners.delete(listener);
+  };
+}
+
+export function clearGlobalStallMessage(): void {
+  globalStallMessage = null;
+  globalStallListeners.forEach((fn) => fn());
+}
+
+// Initialize the stall listener from main process
+if (typeof window !== 'undefined' && window.electronAPI?.onAgentIdleWarning) {
+  window.electronAPI.onAgentIdleWarning((message: string) => {
+    globalStallMessage = message;
+    globalStallListeners.forEach((fn) => fn());
+  });
+}
+
 const statusLabel: Record<AgentStatus, string> = {
   idle: 'Idle',
   running: 'Running',
@@ -92,6 +121,19 @@ function AnsiLog({ text }: { text: string }) {
   );
 }
 
+function useStallMessage(): string | null {
+  const [stallMessage, setStallMessage] = useState<string | null>(globalStallMessage);
+
+  useEffect(() => {
+    const unsubscribe = subscribeGlobalStall(() => {
+      setStallMessage(getGlobalStallMessage());
+    });
+    return unsubscribe;
+  }, []);
+
+  return stallMessage;
+}
+
 export default function AgentPanel({
   height,
   collapsed,
@@ -102,7 +144,15 @@ export default function AgentPanel({
   onToggleCollapse: () => void;
 }) {
   const store = useTaskStore();
+  const stallMessage = useStallMessage();
   const [message, setMessage] = useState('');
+
+  // Clear stall message when agent starts running or becomes idle
+  useEffect(() => {
+    if (store.agentStatus === 'running' || store.agentStatus === 'idle') {
+      clearGlobalStallMessage();
+    }
+  }, [store.agentStatus]);
   const [isSending, setIsSending] = useState(false);
   const logViewportRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
@@ -148,6 +198,11 @@ export default function AgentPanel({
   };
 
   useEffect(() => {
+    // Only capture keyboard when terminal is visible and controls are enabled.
+    // When collapsed, these keys belong to normal UI interactions (Escape for
+    // modals, Space for checkboxes, Arrow keys for scrolling, etc.).
+    if (collapsed || !showTerminalControls) return;
+
     const handleWindowKeyDown = (event: KeyboardEvent): void => {
       if (
         event.defaultPrevented ||
@@ -172,7 +227,7 @@ export default function AgentPanel({
 
     window.addEventListener('keydown', handleWindowKeyDown);
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
-  }, [store]);
+  }, [store, collapsed, showTerminalControls]);
 
   useEffect(() => {
     if (collapsed) {
@@ -284,6 +339,32 @@ export default function AgentPanel({
       {store.agentError && (
         <div className="shrink-0 border-x border-red-500/20 bg-red-500/5 px-2.5 py-1 text-[11px] text-red-600">
           {store.agentError}
+        </div>
+      )}
+
+      {!store.agentError && stallMessage && (
+        <div className="shrink-0 border-x border-yellow-500/20 bg-yellow-500/5 px-2.5 py-1.5">
+          <p className="text-[11px] text-yellow-600 mb-1.5">{stallMessage}</p>
+          <div className="flex gap-1.5">
+            <button
+              onClick={async () => {
+                clearGlobalStallMessage();
+                await window.electronAPI.resetStallTimer();
+              }}
+              className="flex-1 rounded-md bg-yellow-500/10 px-2 py-1 text-[11px] font-medium text-yellow-700 hover:bg-yellow-500/20 transition-colors"
+            >
+              Continue
+            </button>
+            <button
+              onClick={async () => {
+                clearGlobalStallMessage();
+                await window.electronAPI.stopIdleAgent(store.filePath!);
+              }}
+              className="flex-1 rounded-md bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-600 hover:bg-red-500/15 transition-colors"
+            >
+              Stop Agent
+            </button>
+          </div>
         </div>
       )}
 

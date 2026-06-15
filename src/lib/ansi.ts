@@ -44,7 +44,7 @@ const ANSI_BRIGHT_COLORS = [
 ] as const;
 
 const SEMANTIC_TOKEN_PATTERN =
-  /(Bash\([^)]+\)|\/Users\/[^\s)]+|\bVite\b|\bElectron\b|\bDone\b|\btouch\b|\bHMR\b|\bCmd\+R\b|\bWAIT_APPROVAL\b|\bALL_TASKS_COMPLETED\b|\bBATCH_COMPLETED\b)/g;
+  /(Bash\([^)]+\)|\/Users\/[^\s)]+|\bVite\b|\bElectron\b|\bDone\b|\btouch\b|\bHMR\b|\bCmd\+R\b|\bWAIT_APPROVAL\b|\bALL_TASKS_COMPLETED\b)/g;
 
 function isPlainState(state: AnsiState): boolean {
   return (
@@ -79,8 +79,8 @@ function getSemanticStyle(token: string): CSSProperties | undefined {
     return { color: '#F4D98B', fontWeight: 700 };
   }
 
-  if (token === 'BATCH_COMPLETED') {
-    return { color: '#E5C07B', fontWeight: 700 };
+  if (/^DONE \d+$/.test(token)) {
+    return { color: '#7CCF83', fontWeight: 700 };
   }
 
   return undefined;

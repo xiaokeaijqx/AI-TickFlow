@@ -81,7 +81,11 @@ export default function App() {
   const incompleteCount = incompleteTasks.length;
   const completedCount = store.tasks.filter((t) => t.completed).length;
   const hasTasks = store.tasks.length > 0;
-  const projectName = store.projectBinding?.projectName || 'TickFlow';
+  const projectName = (() => {
+    if (!store.filePath) return 'TickFlow';
+    const parts = store.filePath.split('/').filter(Boolean);
+    return parts.length >= 2 ? parts[parts.length - 2] : store.filePath.replace(/\.[^/.]+$/, '');
+  })();
   const showBottomBar = store.isExecuting || incompleteCount > 0 || (incompleteCount === 0 && hasTasks);
 
   const selectedCount = store.selectedLineNumbers.size;
@@ -142,10 +146,10 @@ export default function App() {
             </span>
           </div>
         </div>
-        <div className="col-start-3 flex items-center justify-end gap-1 no-drag">
+        <div className="col-start-3 flex items-center justify-end gap-0.5 no-drag">
           <button
             onClick={() => store.refreshTasks()}
-            className="grid h-6 w-6 place-items-center rounded-md text-[13px] text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
+            className="grid h-6 w-6 place-items-center rounded-md text-sm leading-none text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
             title="Refresh tasks"
             aria-label="Refresh tasks"
           >
@@ -153,7 +157,7 @@ export default function App() {
           </button>
           <button
             onClick={() => store.setShowSettings(true)}
-            className="grid h-6 w-6 place-items-center rounded-md text-[13px] text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
+            className="grid h-7 w-7 place-items-center rounded-md text-base leading-none text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
             title="Settings"
             aria-label="Open settings"
           >
@@ -161,11 +165,11 @@ export default function App() {
           </button>
           <button
             onClick={() => store.setCollapsed(true)}
-            className="grid h-6 w-6 place-items-center rounded-md text-[13px] text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
-            title="Collapse TickFlow"
-            aria-label="Collapse TickFlow"
+            className="grid h-6 w-6 place-items-center rounded-md text-sm leading-none text-[#5F6876] transition-colors hover:bg-[#EAEAED] hover:text-[#20242C]"
+            title="Minimize TickFlow"
+            aria-label="Minimize TickFlow"
           >
-            ⌄
+            <span className="mb-px block h-0.5 w-2.5 rounded-full bg-current" />
           </button>
         </div>
       </div>
@@ -195,10 +199,12 @@ export default function App() {
       </div>
 
       <div
-        className="no-drag relative z-10 h-px shrink-0 bg-[#E3E6EC] transition-colors hover:bg-[#C8CED8]"
+        className="no-drag group relative z-10 shrink-0 py-1"
         style={{ cursor: agentPanelCollapsed ? 'default' : 'row-resize' }}
         onMouseDown={agentPanelCollapsed ? undefined : handleResizeStart}
-      />
+      >
+        <div className="h-px bg-transparent transition-colors group-hover:bg-[#C8CED8]" />
+      </div>
 
       <AgentPanel
         height={agentPanelHeight}

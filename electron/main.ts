@@ -73,7 +73,9 @@ function loadSettings(): AppSettings {
         agentConfig: normalizeAgentConfig(rawSettings.agentConfig),
       };
     }
-  } catch {}
+  } catch (error) {
+    console.error('Failed to load settings:', getCommandErrorMessage(error));
+  }
   return defaults;
 }
 
@@ -109,6 +111,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
 
@@ -248,6 +251,7 @@ const TMUX_BIN_CANDIDATES = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', 't
 const CMUX_CLI_PATH = '/Applications/cmux.app/Contents/Resources/bin/cmux';
 const LOG_CAPTURE_LINES = 2000;
 const TMUX_MAX_BUFFER = 1024 * 1024 * 4;
+const PASTE_BUFFER_DELAY_MS = 300;
 
 const APPROVAL_RESPONSES: Record<ApprovalDecision, string> = {
   approve: '继续执行',
@@ -292,12 +296,64 @@ function getCommandErrorMessage(error: unknown): string {
   return 'Command failed';
 }
 
+// ─── Retry helpers ─────────────────────────────────────────────────
+
+const TMUX_RETRY_MAX = 3;
+const TMUX_RETRY_DELAYS = [500, 1000, 2000];
+
+const TRANSIENT_TMUX_ERRORS = [
+  'no server running',
+  'lost server',
+  'connection refused',
+  'no sessions',
+  'connect',
+];
+
+function isTransientTmuxError(error: unknown): boolean {
+  const message = getCommandErrorMessage(error).toLowerCase();
+  return TRANSIENT_TMUX_ERRORS.some((pattern) => message.includes(pattern));
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = TMUX_RETRY_MAX,
+  delays: number[] = TMUX_RETRY_DELAYS,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      // Only retry on transient errors
+      if (attempt < maxRetries && isTransientTmuxError(error)) {
+        const delay = delays[attempt] ?? delays[delays.length - 1];
+        console.warn(
+          `tmux transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms:`,
+          getCommandErrorMessage(error),
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
 async function runTmux(args: string[]): Promise<{ stdout: string; stderr: string }> {
   let lastError: unknown = null;
 
   for (const tmuxBin of TMUX_BIN_CANDIDATES) {
     try {
-      const result = await execFileAsync(tmuxBin, args, { maxBuffer: TMUX_MAX_BUFFER });
+      const result = await withRetry(async () => {
+        const execResult = await execFileAsync(tmuxBin, args, { maxBuffer: TMUX_MAX_BUFFER });
+        return execResult;
+      });
       return {
         stdout: String(result.stdout ?? ''),
         stderr: String(result.stderr ?? ''),
@@ -321,6 +377,16 @@ function shellQuote(value: string): string {
 function getShellPathPrefix(): string {
   const userLocalBin = path.join(app.getPath('home'), '.local/bin').replace(/(["\\])/g, '\\$1');
   return `export PATH="/opt/homebrew/bin:/usr/local/bin:${userLocalBin}:$PATH";`;
+}
+
+const UNSAFE_SHELL_PATTERNS = /[;&|`$<>\\]/;
+
+function validateCustomCommand(command: string): string | null {
+  if (!command) return 'Custom command is empty';
+  if (UNSAFE_SHELL_PATTERNS.test(command)) {
+    return `Custom command contains unsafe shell metacharacters: ${command}`;
+  }
+  return null;
 }
 
 function getAgentStartCommand(config: AgentConfig): string {
@@ -371,6 +437,7 @@ async function hasTmuxSession(sessionName: string): Promise<boolean> {
     await runTmux(['has-session', '-t', sessionName]);
     return true;
   } catch {
+    // Session probably doesn't exist — that's OK
     return false;
   }
 }
@@ -388,8 +455,78 @@ async function sendLiteralLine(sessionName: string, text: string): Promise<void>
 async function pastePrompt(sessionName: string, prompt: string): Promise<void> {
   await runTmux(['set-buffer', prompt]);
   await runTmux(['paste-buffer', '-t', sessionName]);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await new Promise((resolve) => setTimeout(resolve, PASTE_BUFFER_DELAY_MS));
   await runTmux(['send-keys', '-t', sessionName, 'Enter']);
+}
+
+// ─── Stall Watchdog ─────────────────────────────────────────────────
+
+const STALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const STALL_CHECK_INTERVAL_MS = 30_000; // Check every 30 seconds
+
+let stallWatchdogInterval: NodeJS.Timeout | null = null;
+let lastLogChangeTime = 0;
+let lastLogContent = '';
+let idleWarningEmitted = false;
+
+function startStallWatchdog(sessionName: string): void {
+  stopStallWatchdog();
+  lastLogChangeTime = Date.now();
+  lastLogContent = '';
+  idleWarningEmitted = false;
+
+  stallWatchdogInterval = setInterval(async () => {
+    try {
+      const result = await runTmux([
+        'capture-pane',
+        '-e',
+        '-t',
+        sessionName,
+        '-p',
+        '-S',
+        `-${LOG_CAPTURE_LINES}`,
+      ]);
+
+      const currentContent = result.stdout;
+
+      if (currentContent !== lastLogContent) {
+        // Content changed — agent is making progress
+        lastLogContent = currentContent;
+        lastLogChangeTime = Date.now();
+        idleWarningEmitted = false;
+        return;
+      }
+
+      // No change since last check
+      const stalledDuration = Date.now() - lastLogChangeTime;
+      if (stalledDuration >= STALL_TIMEOUT_MS && !idleWarningEmitted) {
+        // Agent idle — warn user but do NOT auto-kill
+        idleWarningEmitted = true;
+
+        const message = `Agent idle (no output for ${Math.round(stalledDuration / 1000)}s). Continue or stop?`;
+        console.warn(message);
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('agent-idle-warning', message);
+        }
+      }
+    } catch (error) {
+      console.error('Stall watchdog check failed:', getCommandErrorMessage(error));
+    }
+  }, STALL_CHECK_INTERVAL_MS);
+}
+
+function stopStallWatchdog(): void {
+  if (stallWatchdogInterval) {
+    clearInterval(stallWatchdogInterval);
+    stallWatchdogInterval = null;
+  }
+  lastLogContent = '';
+  lastLogChangeTime = 0;
+}
+
+function resetStallTimer(): void {
+  lastLogChangeTime = Date.now();
 }
 
 function buildBatchExecutionPrompt(
@@ -398,40 +535,29 @@ function buildBatchExecutionPrompt(
   batchTasks: Task[]
 ): string {
   const taskLines = batchTasks
-    .map((task, index) => `${index + 1}. ${task.title}`)
+    .map((task, index) => `[${index + 1}] ${task.title}`)
     .join('\n');
 
-  return `执行以下 Batch #${batchNumber} 中的任务：
-${taskLines}
+  return `${taskLines}
 
-你可以自行决定执行顺序。
-
-如果需要用户确认，请先输出单独一行 WAIT_APPROVAL，然后输出确认内容。
-
-全部任务完成后，请输出：
-BATCH_COMPLETED
-- <任务1标题>
-- <任务2标题>
-...（列出所有完成的任务标题，TickFlow 会自动更新 task.md）
-
+完成某个任务后输出：DONE N
+需确认时输出：WAIT_APPROVAL
 项目路径：${binding.projectPath}`;
 }
 
 function buildExecutionPrompt(binding: ProjectBinding, uncheckedTasks: Task[], focusedTask?: Task): string {
   const taskLines = uncheckedTasks
-    .map((task, index) => `${index + 1}. ${task.title}`)
+    .map((task, index) => `[${index + 1}] ${task.title}`)
     .join('\n');
   const focusLine = focusedTask && focusedTask.lineNumber >= 0
-    ? `\n优先执行这条任务：${focusedTask.title}\n`
+    ? `优先: ${focusedTask.title}\n`
     : '';
 
-  return `执行以下任务：${focusLine}
-${taskLines || '无'}
+  return `${focusLine}${taskLines || '无'}
 
-如果需要用户确认，请先输出单独一行 WAIT_APPROVAL，然后输出确认内容。
-
-所有任务完成后，请输出单独一行 ALL_TASKS_COMPLETED。
-
+完成某个任务后输出：DONE N
+需确认时输出：WAIT_APPROVAL
+全部完成后输出：ALL_TASKS_COMPLETED
 项目路径：${binding.projectPath}`;
 }
 
@@ -457,6 +583,18 @@ async function ensureAgentSession(filePath: string): Promise<AgentSessionResult>
         started: false,
         error: 'Agent command is empty',
       };
+    }
+
+    if (agentConfig.provider === 'custom') {
+      const validationError = validateCustomCommand(startCommand);
+      if (validationError) {
+        return {
+          success: false,
+          binding,
+          started: false,
+          error: validationError,
+        };
+      }
     }
 
     let started = false;
@@ -517,6 +655,8 @@ async function executeAgentTasks(filePath: string, focusedTask?: Task): Promise<
     const prompt = buildExecutionPrompt(sessionResult.binding, uncheckedTasks, focusedTask);
     await pastePrompt(sessionResult.binding.tmuxSession, prompt);
 
+    startStallWatchdog(sessionResult.binding.tmuxSession);
+
     return {
       success: true,
       binding: sessionResult.binding,
@@ -564,6 +704,9 @@ async function executeBatchPrompt(
     }
     const prompt = buildBatchExecutionPrompt(sessionResult.binding, batchNumber, batchTasks);
     await pastePrompt(sessionResult.binding.tmuxSession, prompt);
+
+    startStallWatchdog(sessionResult.binding.tmuxSession);
+
     return {
       success: true,
       binding: sessionResult.binding,
@@ -607,6 +750,11 @@ async function captureAgentLog(filePath: string): Promise<AgentLogResult> {
       '-S',
       `-${LOG_CAPTURE_LINES}`,
     ]);
+
+    // If log has changed, reset the stall timer
+    if (result.stdout !== lastLogContent) {
+      resetStallTimer();
+    }
 
     return {
       success: true,
@@ -745,6 +893,8 @@ async function stopAgent(filePath: string): Promise<AgentExecutionResult> {
   const binding = getProjectBinding(filePath);
 
   try {
+    stopStallWatchdog();
+
     const sessionExists = await hasTmuxSession(binding.tmuxSession);
     if (sessionExists) {
       await runTmux(['send-keys', '-t', binding.tmuxSession, 'C-c']);
@@ -838,7 +988,12 @@ function watchFile(filePath: string) {
 
   lastMtime = fs.statSync(filePath).mtimeMs;
 
-  // Poll every 500ms for file changes
+  // Poll every 500ms for file changes.
+  // We use polling (setInterval) instead of fs.watch because macOS
+  // fs.watch has known reliability issues with certain editors and
+  // file systems — it can miss events, produce duplicate events, or
+  // stop firing after rapid writes. Polling with mtime comparison
+  // is more predictable for this use case.
   watchInterval = setInterval(() => {
     try {
       if (!fs.existsSync(filePath)) return;
@@ -850,7 +1005,9 @@ function watchFile(filePath: string) {
           mainWindow.webContents.send('file-changed', result.tasks);
         }
       }
-    } catch {}
+    } catch (error) {
+      console.error('File watcher error:', error);
+    }
   }, 500);
 }
 
@@ -973,6 +1130,32 @@ function setupIPC() {
     setWindowCollapsed(collapsed);
   });
 
+  ipcMain.handle('reset-stall-timer', () => {
+    resetStallTimer();
+    idleWarningEmitted = false;
+  });
+
+  ipcMain.handle('stop-stall-watchdog', () => {
+    stopStallWatchdog();
+  });
+
+  ipcMain.handle('stop-idle-agent', async (_event, filePath: string) => {
+    const binding = getProjectBinding(filePath);
+    try {
+      stopStallWatchdog();
+      const sessionExists = await hasTmuxSession(binding.tmuxSession);
+      if (sessionExists) {
+        await runTmux(['send-keys', '-t', binding.tmuxSession, 'C-c']);
+      }
+      // Also send notification so user knows agent was stopped
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent-idle-warning', 'Agent stopped by user.');
+      }
+    } catch (error) {
+      console.error('Failed to stop idle agent:', getCommandErrorMessage(error));
+    }
+  });
+
   ipcMain.handle('notify-complete', () => {
     const notification = new Notification({
       title: 'TickFlow',
@@ -981,8 +1164,21 @@ function setupIPC() {
     });
     notification.show();
 
-    // Play system sound
-    exec('afplay /System/Library/Sounds/Glass.aiff');
+    // Play system sound with fallbacks
+    const sounds = [
+      '/System/Library/Sounds/Glass.aiff',
+      '/System/Library/Sounds/Pop.aiff',
+    ];
+    tryPlaySound(0);
+
+    function tryPlaySound(index: number) {
+      if (index >= sounds.length) return;
+      exec(`afplay "${sounds[index]}"`, (error) => {
+        if (error && index + 1 < sounds.length) {
+          tryPlaySound(index + 1);
+        }
+      });
+    }
   });
 }
 

@@ -77,6 +77,11 @@ export default function TaskItem({ task, isBatchMode = false, isSelected = false
     await store.deleteTask(task.lineNumber);
   };
 
+  const handleCancelQueued = (e: MouseEvent) => {
+    e.stopPropagation();
+    store.cancelQueuedTask(task.lineNumber);
+  };
+
   const handleCancel = (e: MouseEvent) => {
     e.stopPropagation();
     store.cancelPendingTask(task);
@@ -210,7 +215,18 @@ export default function TaskItem({ task, isBatchMode = false, isSelected = false
             </button>
           )}
 
-          {!isRunning && !isPending && (
+          {isQueued && (
+            <button
+              onClick={handleCancelQueued}
+              aria-label="Remove from batch"
+              className="grid h-5 w-5 place-items-center rounded bg-amber-500/10 text-[11px] text-amber-600/70 transition-colors hover:bg-amber-500/15 hover:text-amber-700"
+              title="Remove from batch (back to todo)"
+            >
+              ✕
+            </button>
+          )}
+
+          {!isRunning && !isPending && !isQueued && (
             <button
               onClick={handleDelete}
               aria-label="Delete task"
