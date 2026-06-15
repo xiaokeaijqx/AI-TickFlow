@@ -166,6 +166,10 @@ const createStore = () => {
   let handledApprovalMarkerIndex = -1;
   let handledBatchCompletedIndex = -1;
   let completedTaskIndices = new Set<number>();
+  // Character offset in the agent log captured when a batch is sent. Only DONE
+  // markers AFTER this position belong to the current batch — markers before it
+  // are stale output from previous batches still in the tmux scrollback.
+  let doneParseBaseline = -1;
   let refreshAgentLogInFlight = false;
 
   let state: TaskStore = {
@@ -500,8 +504,11 @@ const createStore = () => {
           const runningBatch = state.batches.find((b) => b.id === state.runningBatchId);
 
           if (runningBatch && runningBatch.tasks.length > 0) {
-            // Parse ALL DONE N markers in the log (regex excludes template text)
-            const { indices } = parseTaskCompletedIndices(newLog, -1);
+            // Parse DONE N markers AFTER the baseline captured at batch send.
+            // This excludes stale DONE markers from previous batches that remain
+            // in the tmux scrollback. Indices are reported against the
+            // ANSI-stripped log, so the baseline must also be stripped-relative.
+            const { indices } = parseTaskCompletedIndices(newLog, doneParseBaseline);
 
             // Filter to indices we haven't processed yet
             const newIndices = indices.filter((i) => !completedTaskIndices.has(i));
@@ -1026,6 +1033,10 @@ const createStore = () => {
 
     handledApprovalMarkerIndex = -1;
     handledBatchCompletedIndex = -1;
+    // Baseline = length of the current ANSI-stripped log. DONE markers at or
+    // before this offset are stale (from prior batches in tmux scrollback) and
+    // must be ignored; only markers the agent emits AFTER this point count.
+    doneParseBaseline = state.agentLog.replace(/\x1b\[[0-9;:]*m/g, '').length;
     state = { ...state, agentStallMessage: null, lastLogChangeTimestamp: Date.now() };
     notify();
     try {
@@ -1046,9 +1057,8 @@ const createStore = () => {
         return;
       }
 
-      // Reset per-batch tracking. The regex /^DONE (\d+)$/ inherently
-      // distinguishes AI output (digit) from template text (letter N),
-      // so we don't need position-based baseline capture.
+      // Reset per-batch dedup tracking. doneParseBaseline (set above) ensures
+      // only DONE markers emitted after this batch started are considered.
       completedTaskIndices = new Set();
     } catch (error) {
       console.error('sendBatchPrompt failed:', error);
