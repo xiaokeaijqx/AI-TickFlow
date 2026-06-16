@@ -129,6 +129,11 @@ export interface BatchRuntimeState {
 }
 
 export interface ElectronAPI {
+  // This window's bound task file (synchronous; '' when unbound). Set at window
+  // creation via additionalArguments — see preload getWindowFilePath.
+  getWindowFilePath: () => string;
+  // Pick a file and open it in a NEW project window (focuses existing if already open).
+  openProjectWindow: () => Promise<string | null>;
   selectTaskFile: () => Promise<string | null>;
   readTaskFile: (filePath: string) => Promise<TaskFileInfo>;
   writeTaskStatus: (filePath: string, lineNumber: number, completed: boolean, expectedTitle?: string) => Promise<void>;
@@ -138,8 +143,8 @@ export interface ElectronAPI {
   undoDeleteTask: (filePath: string, lineNumber: number, lineContent: string) => Promise<void>;
   onFileChanged: (callback: (tasks: Task[]) => void) => () => void;
   getProjectBinding: (filePath: string) => Promise<ProjectBinding>;
-  getAgentConfig: () => Promise<AgentConfig>;
-  setAgentConfig: (config: AgentConfig) => Promise<AgentConfig>;
+  getAgentConfig: (filePath: string) => Promise<AgentConfig>;
+  setAgentConfig: (filePath: string, config: AgentConfig) => Promise<AgentConfig>;
   ensureAgentSession: (filePath: string) => Promise<AgentSessionResult>;
   restartAgent: (filePath: string) => Promise<AgentSessionResult>;
   executeWithAI: (filePath: string, task?: Task) => Promise<AgentExecutionResult>;
@@ -163,9 +168,9 @@ export interface ElectronAPI {
   refreshTasks: (filePath: string) => Promise<TaskFileInfo>;
   setWindowCollapsed: (collapsed: boolean) => Promise<void>;
   onToggleWindow: (callback: () => void) => () => void;
-  onAgentIdleWarning: (callback: (message: string) => void) => () => void;
-  resetStallTimer: () => Promise<void>;
-  stopStallWatchdog: () => Promise<void>;
+  onAgentIdleWarning: (callback: (payload: { message: string; filePath: string }) => void) => () => void;
+  resetStallTimer: (filePath: string) => Promise<void>;
+  stopStallWatchdog: (filePath: string) => Promise<void>;
   stopIdleAgent: (filePath: string) => Promise<void>;
   getBatchRuntime: (filePath: string) => Promise<BatchRuntimeState | null>;
   setBatchRuntime: (filePath: string, state: BatchRuntimeState) => Promise<void>;

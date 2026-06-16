@@ -288,18 +288,22 @@ const createStore = () => {
     },
 
     loadAgentConfig: async () => {
-      const agentConfig = await window.electronAPI.getAgentConfig();
+      // Agent config is per-project — without a bound file there's nothing to load.
+      const filePath = state.filePath;
+      if (!filePath) return;
+      const agentConfig = await window.electronAPI.getAgentConfig(filePath);
       state = { ...state, agentConfig };
       notify();
     },
 
     setAgentConfig: async (config: AgentConfig) => {
+      const filePath = state.filePath;
+      if (!filePath) return;
       const shouldRestartAgent =
         config.provider !== state.agentConfig.provider ||
         config.customCommand.trim() !== state.agentConfig.customCommand.trim() ||
         config.skipPermissions !== state.agentConfig.skipPermissions;
-      const agentConfig = await window.electronAPI.setAgentConfig(config);
-      const filePath = state.filePath;
+      const agentConfig = await window.electronAPI.setAgentConfig(filePath, config);
       const projectBinding = filePath
         ? await window.electronAPI.getProjectBinding(filePath)
         : state.projectBinding;
@@ -681,7 +685,7 @@ const createStore = () => {
                       b.id === state.runningBatchId ? { ...b, status: 'completed' as const } : b
                     ),
                   };
-                  advanceQueue();
+                  advanceQueue({ batchCompleted: true });
                   notify();
                   return;
                 }
@@ -706,7 +710,7 @@ const createStore = () => {
                     b.id === state.runningBatchId ? { ...b, status: 'completed' as const } : b
                   ),
                 };
-                advanceQueue();
+                advanceQueue({ batchCompleted: true });
                 notify();
                 return;
               }
@@ -1276,7 +1280,17 @@ const createStore = () => {
     }
   }
 
-  function advanceQueue(): void {
+  // `batchCompleted` is true when a batch finished on its own (all its tasks
+  // done), false when advanceQueue is called after a manual stop. We notify on
+  // each completed batch, but never on a stop.
+  function advanceQueue(opts: { batchCompleted?: boolean } = {}): void {
+    // Per-queue completion notification: ring once as soon as THIS batch is done,
+    // regardless of whether more batches remain. (Final all-tasks-done is handled
+    // separately in the no-more-batches branch below.)
+    if (opts.batchCompleted) {
+      void window.electronAPI.notifyComplete();
+    }
+
     // Mark running batch as done and remove completed/stopped batches
     const runningLineNumbers = state.batches
       .filter((b) => b.id === state.runningBatchId)
@@ -1353,15 +1367,14 @@ const createStore = () => {
       notify();
 
       // Stop the stall watchdog since there are no more batches
-      void window.electronAPI.stopStallWatchdog();
+      if (state.filePath) void window.electronAPI.stopStallWatchdog(state.filePath);
 
       // Persist the cleared runtime so a restart doesn't resurrect a finished batch.
       persistRuntime();
 
-      // Trigger completion notification if all tasks done
-      if (state.tasks.length > 0 && state.tasks.every((t) => t.completed)) {
-        void window.electronAPI.notifyComplete();
-      }
+      // NOTE: completion notification is no longer fired here. Per-queue ringing
+      // happens at the top of advanceQueue (opts.batchCompleted), which already
+      // covers the final batch — firing again here would double-ring.
     }
   }
 

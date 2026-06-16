@@ -45,11 +45,13 @@ export default function App() {
 
   useEffect(() => {
     async function init() {
-      await store.loadAgentConfig();
-      const defaultPath = await window.electronAPI.getDefaultFilePath();
-      if (defaultPath) {
-        store.setFilePath(defaultPath);
-        const result = await window.electronAPI.readTaskFile(defaultPath);
+      // This window's bound file comes from the main process (per-window),
+      // not the global default — that's what lets each window show its own project.
+      const boundPath = window.electronAPI.getWindowFilePath();
+      if (boundPath) {
+        store.setFilePath(boundPath);
+        await store.loadAgentConfig();
+        const result = await window.electronAPI.readTaskFile(boundPath);
         store.setTasks(result.tasks);
         await store.loadProjectBinding();
         void store.ensureAgentSession();
@@ -96,9 +98,11 @@ export default function App() {
   const queuedCount = store.getQueuedBatches().length;
 
   const handleSelectFile = async () => {
+    // selectTaskFile rebinds THIS window to the chosen file (main process).
     const filePath = await window.electronAPI.selectTaskFile();
     if (filePath) {
       store.setFilePath(filePath);
+      await store.loadAgentConfig();
       const result = await window.electronAPI.readTaskFile(filePath);
       store.setTasks(result.tasks);
       await store.loadProjectBinding();

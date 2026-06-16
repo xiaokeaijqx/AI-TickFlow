@@ -24,9 +24,11 @@ export function clearGlobalStallMessage(): void {
   globalStallListeners.forEach((fn) => fn());
 }
 
-// Initialize the stall listener from main process
+// Initialize the stall listener from main process. Main already routes the
+// warning only to windows bound to the file; the payload carries filePath for
+// defense-in-depth (the per-window guard happens at the dismiss/render site).
 if (typeof window !== 'undefined' && window.electronAPI?.onAgentIdleWarning) {
-  window.electronAPI.onAgentIdleWarning((message: string) => {
+  window.electronAPI.onAgentIdleWarning(({ message }) => {
     globalStallMessage = message;
     globalStallListeners.forEach((fn) => fn());
   });
@@ -353,7 +355,7 @@ export default function AgentPanel({
             <button
               onClick={async () => {
                 clearGlobalStallMessage();
-                await window.electronAPI.resetStallTimer();
+                if (store.filePath) await window.electronAPI.resetStallTimer(store.filePath);
               }}
               title="Dismiss"
               aria-label="Dismiss"

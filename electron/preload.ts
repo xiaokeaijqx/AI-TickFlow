@@ -32,7 +32,16 @@ function invokeWithTimeout<T>(channel: string, timeoutMs: number, ...args: unkno
   });
 }
 
+// This window's bound task file, passed synchronously via additionalArguments
+// (--tickflow-file=...) when the window was created. Empty string = unbound.
+function readWindowFilePath(): string {
+  const arg = process.argv.find((a) => a.startsWith('--tickflow-file='));
+  return arg ? arg.slice('--tickflow-file='.length) : '';
+}
+
 const electronAPI: ElectronAPI = {
+  getWindowFilePath: () => readWindowFilePath(),
+  openProjectWindow: () => invokeWithTimeout<string | null>('open-project-window', 10_000),
   selectTaskFile: () => invokeWithTimeout<string | null>('select-task-file', 10_000),
   readTaskFile: (filePath: string) => invokeWithTimeout('read-task-file', 10_000, filePath),
   writeTaskStatus: (filePath: string, lineNumber: number, completed: boolean, expectedTitle?: string) =>
@@ -49,8 +58,9 @@ const electronAPI: ElectronAPI = {
     return () => ipcRenderer.removeListener('file-changed', handler);
   },
   getProjectBinding: (filePath: string) => invokeWithTimeout('get-project-binding', 10_000, filePath),
-  getAgentConfig: () => invokeWithTimeout('get-agent-config', 10_000),
-  setAgentConfig: (config: AgentConfig) => invokeWithTimeout('set-agent-config', 10_000, config),
+  getAgentConfig: (filePath: string) => invokeWithTimeout('get-agent-config', 10_000, filePath),
+  setAgentConfig: (filePath: string, config: AgentConfig) =>
+    invokeWithTimeout('set-agent-config', 10_000, filePath, config),
   ensureAgentSession: (filePath: string) => invokeWithTimeout('ensure-agent-session', 30_000, filePath),
   restartAgent: (filePath: string) => invokeWithTimeout('restart-agent', 30_000, filePath),
   executeWithAI: (filePath: string, task?: Task) => invokeWithTimeout('execute-with-ai', 30_000, filePath, task),
@@ -81,13 +91,14 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('toggle-window', handler);
     return () => ipcRenderer.removeListener('toggle-window', handler);
   },
-  onAgentIdleWarning: (callback: (message: string) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, message: string) => callback(message);
+  onAgentIdleWarning: (callback: (payload: { message: string; filePath: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { message: string; filePath: string }) =>
+      callback(payload);
     ipcRenderer.on('agent-idle-warning', handler);
     return () => ipcRenderer.removeListener('agent-idle-warning', handler);
   },
-  resetStallTimer: () => invokeWithTimeout<void>('reset-stall-timer', 10_000),
-  stopStallWatchdog: () => invokeWithTimeout<void>('stop-stall-watchdog', 10_000),
+  resetStallTimer: (filePath: string) => invokeWithTimeout<void>('reset-stall-timer', 10_000, filePath),
+  stopStallWatchdog: (filePath: string) => invokeWithTimeout<void>('stop-stall-watchdog', 10_000, filePath),
   stopIdleAgent: (filePath: string) => invokeWithTimeout<void>('stop-idle-agent', 10_000, filePath),
   getBatchRuntime: (filePath: string) => invokeWithTimeout('get-batch-runtime', 10_000, filePath),
   setBatchRuntime: (filePath: string, state: BatchRuntimeState) =>

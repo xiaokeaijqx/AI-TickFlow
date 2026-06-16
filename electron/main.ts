@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, dialog, Notification, session } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, dialog, Menu, Notification, session } from 'electron';
 import type { OpenDialogOptions } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -32,7 +32,7 @@ const settingsPath = path.join(app.getPath('userData'), 'tickflow-settings.json'
 type AppSettings = {
   filePath: string;
   shortcut: string;
-  agentConfig: AgentConfig;
+  agentConfigs: Record<string, AgentConfig>;
   notificationSound: string;
   batchRuntime: Record<string, BatchRuntimeState>;
 };
@@ -65,22 +65,47 @@ function normalizeAgentConfig(value: unknown): AgentConfig {
   };
 }
 
+function normalizeAgentConfigs(value: unknown): Record<string, AgentConfig> {
+  if (typeof value !== 'object' || value === null) return {};
+  const out: Record<string, AgentConfig> = {};
+  for (const [key, config] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = normalizeAgentConfig(config);
+  }
+  return out;
+}
+
 function loadSettings(): AppSettings {
   const defaults: AppSettings = {
     filePath: '',
     shortcut: 'Cmd+Shift+T',
-    agentConfig: DEFAULT_AGENT_CONFIG,
+    agentConfigs: {},
     notificationSound: 'Glass.aiff',
     batchRuntime: {},
   };
 
   try {
     if (fs.existsSync(settingsPath)) {
-      const rawSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Partial<AppSettings>;
+      const rawSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Partial<AppSettings> & {
+        agentConfig?: unknown;
+      };
+      const filePath = typeof rawSettings.filePath === 'string' ? rawSettings.filePath : defaults.filePath;
+
+      // Per-project agent configs. Back-compat: if no valid `agentConfigs` map
+      // exists but a legacy single `agentConfig` + `filePath` are present, seed
+      // the map keyed by the resolved legacy file path.
+      let agentConfigs: Record<string, AgentConfig>;
+      if (typeof rawSettings.agentConfigs === 'object' && rawSettings.agentConfigs !== null) {
+        agentConfigs = normalizeAgentConfigs(rawSettings.agentConfigs);
+      } else if (rawSettings.agentConfig !== undefined && filePath) {
+        agentConfigs = { [path.resolve(filePath)]: normalizeAgentConfig(rawSettings.agentConfig) };
+      } else {
+        agentConfigs = {};
+      }
+
       return {
-        filePath: typeof rawSettings.filePath === 'string' ? rawSettings.filePath : defaults.filePath,
+        filePath,
         shortcut: typeof rawSettings.shortcut === 'string' ? rawSettings.shortcut : defaults.shortcut,
-        agentConfig: normalizeAgentConfig(rawSettings.agentConfig),
+        agentConfigs,
         notificationSound: typeof rawSettings.notificationSound === 'string' ? rawSettings.notificationSound : defaults.notificationSound,
         batchRuntime:
           typeof rawSettings.batchRuntime === 'object' && rawSettings.batchRuntime !== null
@@ -99,9 +124,22 @@ function saveSettings(settings: Partial<AppSettings>) {
   const merged: AppSettings = {
     ...current,
     ...settings,
-    agentConfig: settings.agentConfig ? normalizeAgentConfig(settings.agentConfig) : current.agentConfig,
+    agentConfigs: settings.agentConfigs ? normalizeAgentConfigs(settings.agentConfigs) : current.agentConfigs,
   };
   fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
+}
+
+function getAgentConfigFor(filePath: string): AgentConfig {
+  const key = path.resolve(filePath);
+  return loadSettings().agentConfigs[key] ?? DEFAULT_AGENT_CONFIG;
+}
+
+function setAgentConfigFor(filePath: string, config: AgentConfig): AgentConfig {
+  const key = path.resolve(filePath);
+  const normalized = normalizeAgentConfig(config);
+  const current = loadSettings();
+  saveSettings({ agentConfigs: { ...current.agentConfigs, [key]: normalized } });
+  return normalized;
 }
 
 // Fix #6: Allowlist of RESOLVED file paths the renderer is permitted to touch.
@@ -126,8 +164,36 @@ function assertApprovedFile(filePath: string): string | null {
   return resolved;
 }
 
-let mainWindow: BrowserWindow | null = null;
-let expandedWindowBounds: Rectangle | null = null;
+interface WindowEntry {
+  window: BrowserWindow;
+  filePath: string;
+  expandedBounds: Rectangle | null;
+}
+
+// Keyed by window.webContents.id. Replaces the old single-window globals so the
+// app can host one project window per bound task file.
+const windowsById = new Map<number, WindowEntry>();
+
+function getEntry(wc: Electron.WebContents): WindowEntry | undefined {
+  return windowsById.get(wc.id);
+}
+
+function getEntryByFilePath(filePath: string): WindowEntry | undefined {
+  const resolved = path.resolve(filePath);
+  for (const entry of windowsById.values()) {
+    if (path.resolve(entry.filePath) === resolved) return entry;
+  }
+  return undefined;
+}
+
+function windowsForFilePath(filePath: string): WindowEntry[] {
+  const resolved = path.resolve(filePath);
+  return allEntries().filter((entry) => path.resolve(entry.filePath) === resolved);
+}
+
+function allEntries(): WindowEntry[] {
+  return Array.from(windowsById.values());
+}
 
 const DEV_SERVER_URL = 'http://localhost:5173';
 
@@ -163,8 +229,22 @@ function buildCspHeader(): string {
   ].join('; ');
 }
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
+// Registers the CSP header handler exactly once for the default session. Doing
+// this per-window would stack duplicate handlers. Header is dev/prod aware so
+// Vite HMR keeps working. (Fix #4)
+function registerCsp(): void {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [buildCspHeader()],
+      },
+    });
+  });
+}
+
+function createWindow(filePath: string): BrowserWindow {
+  const win = new BrowserWindow({
     width: 320,
     height: 520,
     minWidth: EXPANDED_MIN_SIZE[0],
@@ -183,23 +263,17 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Synchronous handshake: the renderer reads its bound file from argv on
+      // startup (no IPC round-trip / startup race). See preload getWindowFilePath.
+      additionalArguments: [`--tickflow-file=${filePath}`],
     },
   });
 
-  // Fix #4: Set a Content-Security-Policy on every response. Registered once
-  // here, before content loads. Header is dev/prod aware so Vite HMR keeps working.
-  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [buildCspHeader()],
-      },
-    });
-  });
+  windowsById.set(win.webContents.id, { window: win, filePath, expandedBounds: null });
 
   // Fix #5: Harden the renderer against navigation / new-window escapes.
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', (event, url) => {
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => {
     // Allow only the legitimate app URL (dev server in dev, file URL in prod).
     if (isDevMode()) {
       if (!url.startsWith(DEV_SERVER_URL)) {
@@ -209,32 +283,131 @@ function createWindow() {
       event.preventDefault();
     }
   });
-  mainWindow.webContents.on('will-attach-webview', (event) => {
+  win.webContents.on('will-attach-webview', (event) => {
     event.preventDefault();
   });
 
   // In dev mode, load from Vite dev server
   if (isDevMode()) {
-    mainWindow.loadURL(DEV_SERVER_URL);
+    win.loadURL(DEV_SERVER_URL);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+    win.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
 
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  mainWindow.setAlwaysOnTop(true, 'floating');
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.setAlwaysOnTop(true, 'floating');
 
   // Prevent title from showing
-  mainWindow.on('page-title-updated', (e) => e.preventDefault());
+  win.on('page-title-updated', (e) => e.preventDefault());
+
+  // Capture the id now — win.webContents is unreliable inside 'closed'.
+  const wcId = win.webContents.id;
+  win.on('closed', () => cleanupWindow(wcId));
+
+  return win;
 }
 
-function setWindowCollapsed(collapsed: boolean): void {
-  if (!mainWindow) return;
+// Tears down per-window backend state when a window closes. The agent's tmux
+// session is intentionally left running (matches single-window behavior).
+function cleanupWindow(wcId: number): void {
+  const entry = windowsById.get(wcId);
+  if (!entry) return;
+  windowsById.delete(wcId);
+  if (!entry.filePath) return;
+  stopWatchingFile(entry.filePath);
+  // Stop the stall watchdog only if no other window is still bound to this file.
+  if (!getEntryByFilePath(entry.filePath)) {
+    const binding = getProjectBinding(entry.filePath);
+    stopStallWatchdog(binding.tmuxSession);
+  }
+}
 
+// Opens (or focuses) a window bound to filePath. Dedups so the same file never
+// has two competing renderers/agents (Group 7 edge case).
+function openProjectWindow(filePath: string): BrowserWindow {
+  const approved = approveFilePath(filePath);
+  const existing = getEntryByFilePath(approved);
+  if (existing) {
+    existing.window.show();
+    existing.window.focus();
+    return existing.window;
+  }
+  startWatchingFile(approved);
+  saveSettings({ filePath: approved }); // remember as startup default
+  const win = createWindow(approved);
+  win.show();
+  win.focus();
+  return win;
+}
+
+// Rebinds the sender window to a new task file (the in-window "change file"
+// flow). Swaps watchers and updates the registry entry + startup default.
+function rebindWindow(wc: Electron.WebContents, newFilePath: string): string {
+  const resolved = approveFilePath(newFilePath);
+  const entry = getEntry(wc);
+  if (entry) {
+    if (path.resolve(entry.filePath) !== resolved) {
+      if (entry.filePath) stopWatchingFile(entry.filePath);
+      entry.filePath = resolved;
+      startWatchingFile(resolved);
+    }
+  } else {
+    startWatchingFile(resolved);
+  }
+  saveSettings({ filePath: resolved });
+  return resolved;
+}
+
+// Shows the markdown file picker. Parented to a window when one is focused.
+async function pickTaskFile(parentWin?: BrowserWindow): Promise<string | null> {
+  const dialogOptions: OpenDialogOptions = {
+    properties: ['openFile'],
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+    defaultPath: app.getPath('documents'),
+  };
+  const result = parentWin
+    ? await dialog.showOpenDialog(parentWin, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+}
+
+// Application menu — provides File ▸ New Project Window (Cmd/Ctrl+N). Using a
+// Menu accelerator (not globalShortcut) means it only fires when the app is
+// focused, leaving Cmd+N free for other apps.
+function buildAppMenu(): void {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(process.platform === 'darwin'
+      ? [{ role: 'appMenu' as const }]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New Project Window',
+          accelerator: 'CmdOrCtrl+N',
+          click: async (_item, focusedWin) => {
+            const picked = await pickTaskFile(focusedWin instanceof BrowserWindow ? focusedWin : undefined);
+            if (picked) openProjectWindow(picked);
+          },
+        },
+        { type: 'separator' as const },
+        { role: 'close' as const },
+      ],
+    },
+    { role: 'editMenu' as const },
+    { role: 'viewMenu' as const },
+    { role: 'windowMenu' as const },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function setWindowCollapsed(win: BrowserWindow, entry: WindowEntry, collapsed: boolean): void {
   if (collapsed) {
-    const bounds = mainWindow.getBounds();
-    expandedWindowBounds = bounds;
-    mainWindow.setMinimumSize(COLLAPSED_SIZE.width, COLLAPSED_SIZE.height);
-    mainWindow.setBounds({
+    const bounds = win.getBounds();
+    entry.expandedBounds = bounds;
+    win.setMinimumSize(COLLAPSED_SIZE.width, COLLAPSED_SIZE.height);
+    win.setBounds({
       x: bounds.x + bounds.width - COLLAPSED_SIZE.width,
       y: bounds.y,
       width: COLLAPSED_SIZE.width,
@@ -243,29 +416,33 @@ function setWindowCollapsed(collapsed: boolean): void {
     return;
   }
 
-  mainWindow.setMinimumSize(...EXPANDED_MIN_SIZE);
-  mainWindow.setMaximumSize(...EXPANDED_MAX_SIZE);
+  win.setMinimumSize(...EXPANDED_MIN_SIZE);
+  win.setMaximumSize(...EXPANDED_MAX_SIZE);
 
-  if (expandedWindowBounds) {
-    mainWindow.setBounds(expandedWindowBounds);
-    expandedWindowBounds = null;
+  if (entry.expandedBounds) {
+    win.setBounds(entry.expandedBounds);
+    entry.expandedBounds = null;
     return;
   }
 
-  mainWindow.setSize(320, 420);
+  win.setSize(320, 420);
 }
 
 function registerShortcut(shortcut: string) {
   globalShortcut.unregisterAll();
 
   const registered = globalShortcut.register(shortcut, () => {
-    if (mainWindow) {
-      if (mainWindow.isVisible()) {
-        mainWindow.hide();
-      } else {
-        mainWindow.show();
-        mainWindow.focus();
-      }
+    const windows = BrowserWindow.getAllWindows();
+    if (windows.length === 0) return;
+    // Toggle ALL windows together: if any is visible, hide all; else show+focus all.
+    const anyVisible = windows.some((w) => w.isVisible());
+    if (anyVisible) {
+      windows.forEach((w) => w.hide());
+    } else {
+      windows.forEach((w) => {
+        w.show();
+        w.focus();
+      });
     }
   });
 
@@ -590,7 +767,7 @@ function getAgentProviderLabel(provider: AgentProvider): string {
 }
 
 function getProjectBinding(filePath: string): ProjectBinding {
-  const agentConfig = loadSettings().agentConfig;
+  const agentConfig = getAgentConfigFor(filePath);
   const taskFile = path.resolve(filePath);
   const projectPath = path.dirname(taskFile);
   const projectName = path.basename(projectPath) || 'project';
@@ -639,18 +816,30 @@ async function pastePrompt(sessionName: string, prompt: string): Promise<void> {
 const STALL_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 const STALL_CHECK_INTERVAL_MS = 30_000; // Check every 30 seconds
 
-let stallWatchdogInterval: NodeJS.Timeout | null = null;
-let lastLogChangeTime = 0;
-let lastLogContent = '';
-let idleWarningEmitted = false;
+interface WatchdogEntry {
+  interval: NodeJS.Timeout;
+  filePath: string;
+  lastLogChangeTime: number;
+  lastLogContent: string;
+  idleWarningEmitted: boolean;
+}
 
-function startStallWatchdog(sessionName: string): void {
-  stopStallWatchdog();
-  lastLogChangeTime = Date.now();
-  lastLogContent = '';
-  idleWarningEmitted = false;
+// One watchdog per tmux session. Keyed by session name so concurrent project
+// agents don't clobber each other's stall state (the cross-project bug).
+const watchdogs = new Map<string, WatchdogEntry>();
 
-  stallWatchdogInterval = setInterval(async () => {
+function startStallWatchdog(sessionName: string, filePath: string): void {
+  stopStallWatchdog(sessionName);
+
+  const entry: WatchdogEntry = {
+    interval: null as unknown as NodeJS.Timeout, // assigned immediately below
+    filePath,
+    lastLogChangeTime: Date.now(),
+    lastLogContent: '',
+    idleWarningEmitted: false,
+  };
+
+  entry.interval = setInterval(async () => {
     try {
       const result = await runTmux([
         'capture-pane',
@@ -664,44 +853,51 @@ function startStallWatchdog(sessionName: string): void {
 
       const currentContent = result.stdout;
 
-      if (currentContent !== lastLogContent) {
+      if (currentContent !== entry.lastLogContent) {
         // Content changed — agent is making progress
-        lastLogContent = currentContent;
-        lastLogChangeTime = Date.now();
-        idleWarningEmitted = false;
+        entry.lastLogContent = currentContent;
+        entry.lastLogChangeTime = Date.now();
+        entry.idleWarningEmitted = false;
         return;
       }
 
       // No change since last check
-      const stalledDuration = Date.now() - lastLogChangeTime;
-      if (stalledDuration >= STALL_TIMEOUT_MS && !idleWarningEmitted) {
+      const stalledDuration = Date.now() - entry.lastLogChangeTime;
+      if (stalledDuration >= STALL_TIMEOUT_MS && !entry.idleWarningEmitted) {
         // Agent idle — warn user but do NOT auto-kill
-        idleWarningEmitted = true;
+        entry.idleWarningEmitted = true;
 
         const message = `代理已约 ${Math.round(stalledDuration / 60000)} 分钟无新输出（可能已完成未上报或卡住）。如需停止，请点下方 Stop 按钮。`;
         console.warn(message);
 
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('agent-idle-warning', message);
+        // Targeted routing: only windows bound to this session's file.
+        for (const winEntry of windowsForFilePath(entry.filePath)) {
+          if (!winEntry.window.isDestroyed()) {
+            winEntry.window.webContents.send('agent-idle-warning', { message, filePath: entry.filePath });
+          }
         }
       }
     } catch (error) {
       console.error('Stall watchdog check failed:', getCommandErrorMessage(error));
     }
   }, STALL_CHECK_INTERVAL_MS);
+
+  watchdogs.set(sessionName, entry);
 }
 
-function stopStallWatchdog(): void {
-  if (stallWatchdogInterval) {
-    clearInterval(stallWatchdogInterval);
-    stallWatchdogInterval = null;
+function stopStallWatchdog(sessionName: string): void {
+  const entry = watchdogs.get(sessionName);
+  if (!entry) return;
+  clearInterval(entry.interval);
+  watchdogs.delete(sessionName);
+}
+
+function resetStallTimer(sessionName: string): void {
+  const entry = watchdogs.get(sessionName);
+  if (entry) {
+    entry.lastLogChangeTime = Date.now();
+    entry.idleWarningEmitted = false;
   }
-  lastLogContent = '';
-  lastLogChangeTime = 0;
-}
-
-function resetStallTimer(): void {
-  lastLogChangeTime = Date.now();
 }
 
 function buildBatchExecutionPrompt(
@@ -745,7 +941,7 @@ function buildExecutionPrompt(binding: ProjectBinding, uncheckedTasks: Task[], f
 
 async function ensureAgentSession(filePath: string): Promise<AgentSessionResult> {
   const binding = getProjectBinding(filePath);
-  const agentConfig = loadSettings().agentConfig;
+  const agentConfig = getAgentConfigFor(filePath);
   const startCommand = getAgentStartCommand(agentConfig);
 
   try {
@@ -837,7 +1033,7 @@ async function executeAgentTasks(filePath: string, focusedTask?: Task): Promise<
     const prompt = buildExecutionPrompt(sessionResult.binding, uncheckedTasks, focusedTask);
     await pastePrompt(sessionResult.binding.tmuxSession, prompt);
 
-    startStallWatchdog(sessionResult.binding.tmuxSession);
+    startStallWatchdog(sessionResult.binding.tmuxSession, filePath);
 
     return {
       success: true,
@@ -888,7 +1084,7 @@ async function executeBatchPrompt(
     const prompt = buildBatchExecutionPrompt(sessionResult.binding, batchNumber, batchTasks, batchId);
     await pastePrompt(sessionResult.binding.tmuxSession, prompt);
 
-    startStallWatchdog(sessionResult.binding.tmuxSession);
+    startStallWatchdog(sessionResult.binding.tmuxSession, filePath);
 
     return {
       success: true,
@@ -934,9 +1130,12 @@ async function captureAgentLog(filePath: string): Promise<AgentLogResult> {
       `-${LOG_CAPTURE_LINES}`,
     ]);
 
-    // If log has changed, reset the stall timer
-    if (result.stdout !== lastLogContent) {
-      resetStallTimer();
+    // If log has changed, reset the stall timer for THIS session (per-session
+    // state — comparing against a global would cross-contaminate projects).
+    const watchdog = watchdogs.get(binding.tmuxSession);
+    if (watchdog && result.stdout !== watchdog.lastLogContent) {
+      watchdog.lastLogContent = result.stdout;
+      resetStallTimer(binding.tmuxSession);
     }
 
     return {
@@ -1076,7 +1275,7 @@ async function stopAgent(filePath: string): Promise<AgentExecutionResult> {
   const binding = getProjectBinding(filePath);
 
   try {
-    stopStallWatchdog();
+    stopStallWatchdog(binding.tmuxSession);
 
     const sessionExists = await hasTmuxSession(binding.tmuxSession);
     if (sessionExists) {
@@ -1151,23 +1350,39 @@ function editTaskTitle(filePath: string, lineNumber: number, newTitle: string): 
 
 // ─── File Watcher (polling) ───────────────────────────────────
 
-let watchInterval: NodeJS.Timeout | null = null;
-let lastMtime: number = 0;
+interface WatcherEntry {
+  interval: NodeJS.Timeout;
+  lastMtime: number;
+  refCount: number;
+}
 
-function watchFile(filePath: string) {
-  if (watchInterval) {
-    clearInterval(watchInterval);
+// One poller per resolved file path, shared across windows bound to the same
+// file (refCount). Replaces the old single-file globals.
+const watchers = new Map<string, WatcherEntry>();
+
+// Begin watching a file (or bump its refCount if already watched). Each call
+// must be balanced by a stopWatchingFile call when the window closes.
+function startWatchingFile(filePath: string): void {
+  const key = path.resolve(filePath);
+  const existing = watchers.get(key);
+  if (existing) {
+    existing.refCount++;
+    return;
   }
 
-  if (!fs.existsSync(filePath)) {
-    const dir = path.dirname(filePath);
+  if (!fs.existsSync(key)) {
+    const dir = path.dirname(key);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(filePath, `# Tasks\n\n`, 'utf-8');
+    fs.writeFileSync(key, `# Tasks\n\n`, 'utf-8');
   }
 
-  lastMtime = fs.statSync(filePath).mtimeMs;
+  const entry: WatcherEntry = {
+    interval: null as unknown as NodeJS.Timeout, // assigned immediately below
+    lastMtime: fs.statSync(key).mtimeMs,
+    refCount: 1,
+  };
 
   // Poll every 500ms for file changes.
   // We use polling (setInterval) instead of fs.watch because macOS
@@ -1175,41 +1390,58 @@ function watchFile(filePath: string) {
   // file systems — it can miss events, produce duplicate events, or
   // stop firing after rapid writes. Polling with mtime comparison
   // is more predictable for this use case.
-  watchInterval = setInterval(() => {
+  entry.interval = setInterval(() => {
     try {
-      if (!fs.existsSync(filePath)) return;
-      const mtime = fs.statSync(filePath).mtimeMs;
-      if (mtime !== lastMtime) {
-        lastMtime = mtime;
-        const result = readTasks(filePath);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('file-changed', result.tasks);
+      if (!fs.existsSync(key)) return;
+      const mtime = fs.statSync(key).mtimeMs;
+      if (mtime !== entry.lastMtime) {
+        entry.lastMtime = mtime;
+        const result = readTasks(key);
+        // Targeted routing: only windows bound to this file get the update.
+        for (const winEntry of windowsForFilePath(key)) {
+          if (!winEntry.window.isDestroyed()) {
+            winEntry.window.webContents.send('file-changed', result.tasks);
+          }
         }
       }
     } catch (error) {
       console.error('File watcher error:', error);
     }
   }, 500);
+
+  watchers.set(key, entry);
+}
+
+// Decrement a file's refCount; tear the poller down when it reaches zero.
+function stopWatchingFile(filePath: string): void {
+  const key = path.resolve(filePath);
+  const entry = watchers.get(key);
+  if (!entry) return;
+  entry.refCount--;
+  if (entry.refCount <= 0) {
+    clearInterval(entry.interval);
+    watchers.delete(key);
+  }
 }
 
 // ─── IPC Handlers ────────────────────────────────────────────────
 
 function setupIPC() {
-  ipcMain.handle('select-task-file', async () => {
-    const dialogOptions: OpenDialogOptions = {
-      properties: ['openFile'],
-      filters: [{ name: 'Markdown', extensions: ['md'] }],
-      defaultPath: app.getPath('documents'),
-    };
-    const result = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, dialogOptions)
-      : await dialog.showOpenDialog(dialogOptions);
-    if (result.canceled || result.filePaths.length === 0) return null;
-    // Dialog result is trusted (the user explicitly chose it) — approve & persist.
-    const filePath = approveFilePath(result.filePaths[0]);
-    saveSettings({ filePath });
-    watchFile(filePath);
-    return filePath;
+  ipcMain.handle('select-task-file', async (event) => {
+    const senderWin = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const picked = await pickTaskFile(senderWin);
+    if (!picked) return null;
+    // Dialog result is trusted (the user explicitly chose it) — approve,
+    // rebind the sender window to it, and start watching.
+    return rebindWindow(event.sender, picked);
+  });
+
+  ipcMain.handle('open-project-window', async (event) => {
+    const senderWin = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const picked = await pickTaskFile(senderWin);
+    if (!picked) return null;
+    openProjectWindow(picked);
+    return path.resolve(picked);
   });
 
   ipcMain.handle('read-task-file', (_event, filePath: string) => {
@@ -1239,11 +1471,11 @@ function setupIPC() {
     return getProjectBinding(approved);
   });
 
-  ipcMain.handle('get-agent-config', () => {
-    return loadSettings().agentConfig;
+  ipcMain.handle('get-agent-config', (_event, filePath: string) => {
+    return getAgentConfigFor(filePath);
   });
 
-  ipcMain.handle('set-agent-config', (_event, config: AgentConfig) => {
+  ipcMain.handle('set-agent-config', (_event, filePath: string, config: AgentConfig) => {
     const agentConfig = normalizeAgentConfig(config);
     // Fix #7: never persist an unsafe custom command. Reject the change and
     // return the current (unchanged) config so the renderer reflects reality.
@@ -1251,11 +1483,10 @@ function setupIPC() {
       const validationError = validateCustomCommand(agentConfig.customCommand.trim());
       if (validationError) {
         console.warn(`Rejected unsafe custom command: ${validationError}`);
-        return loadSettings().agentConfig;
+        return getAgentConfigFor(filePath);
       }
     }
-    saveSettings({ agentConfig });
-    return agentConfig;
+    return setAgentConfigFor(filePath, agentConfig);
   });
 
   ipcMain.handle('ensure-agent-session', async (_event, filePath: string) => {
@@ -1265,7 +1496,7 @@ function setupIPC() {
   ipcMain.handle('restart-agent', async (_event, filePath: string) => {
     const binding = getProjectBinding(filePath);
     try {
-      stopStallWatchdog();
+      stopStallWatchdog(binding.tmuxSession);
       if (await hasTmuxSession(binding.tmuxSession)) {
         await runTmux(['kill-session', '-t', binding.tmuxSession]);
       }
@@ -1332,11 +1563,10 @@ function setupIPC() {
     return loadSettings().filePath;
   });
 
-  ipcMain.handle('set-default-file-path', (_event, filePath: string) => {
-    // Renderer only calls this with the user-selected default path — approve it (Fix #6).
-    const approved = approveFilePath(filePath);
-    saveSettings({ filePath: approved });
-    watchFile(approved);
+  ipcMain.handle('set-default-file-path', (event, filePath: string) => {
+    // Renderer only calls this with the user-selected default path — approve it
+    // (Fix #6) and rebind the sender window to it.
+    return rebindWindow(event.sender, filePath);
   });
 
   ipcMain.handle('get-shortcut', () => {
@@ -1365,30 +1595,35 @@ function setupIPC() {
     return readTasks(approved);
   });
 
-  ipcMain.handle('set-window-collapsed', (_event, collapsed: boolean) => {
-    setWindowCollapsed(collapsed);
+  ipcMain.handle('set-window-collapsed', (event, collapsed: boolean) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const entry = getEntry(event.sender);
+    if (!win || !entry) return;
+    setWindowCollapsed(win, entry, collapsed);
   });
 
-  ipcMain.handle('reset-stall-timer', () => {
-    resetStallTimer();
-    idleWarningEmitted = false;
+  ipcMain.handle('reset-stall-timer', (_event, filePath: string) => {
+    const binding = getProjectBinding(filePath);
+    resetStallTimer(binding.tmuxSession);
   });
 
-  ipcMain.handle('stop-stall-watchdog', () => {
-    stopStallWatchdog();
+  ipcMain.handle('stop-stall-watchdog', (_event, filePath: string) => {
+    const binding = getProjectBinding(filePath);
+    stopStallWatchdog(binding.tmuxSession);
   });
 
-  ipcMain.handle('stop-idle-agent', async (_event, filePath: string) => {
+  ipcMain.handle('stop-idle-agent', async (event, filePath: string) => {
     const binding = getProjectBinding(filePath);
     try {
-      stopStallWatchdog();
+      stopStallWatchdog(binding.tmuxSession);
       const sessionExists = await hasTmuxSession(binding.tmuxSession);
       if (sessionExists) {
         await runTmux(['send-keys', '-t', binding.tmuxSession, 'C-c']);
       }
-      // Also send notification so user knows agent was stopped
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('agent-idle-warning', 'Agent stopped by user.');
+      // Notify the requesting window so the user knows the agent was stopped.
+      const entry = getEntry(event.sender);
+      if (entry && !entry.window.isDestroyed()) {
+        entry.window.webContents.send('agent-idle-warning', { message: 'Agent stopped by user.', filePath });
       }
     } catch (error) {
       console.error('Failed to stop idle agent:', getCommandErrorMessage(error));
@@ -1477,18 +1712,35 @@ function setupIPC() {
 
 app.whenReady().then(() => {
   setupIPC();
-  createWindow();
+  registerCsp();   // once for the default session (Fix #4)
+  buildAppMenu();  // File ▸ New Project Window (Cmd/Ctrl+N)
 
   const settings = loadSettings();
   registerShortcut(settings.shortcut);
+
+  // Open the last-used project window (back-compat single-window UX). If there's
+  // no persisted file yet, open an unbound window so the renderer shows its
+  // file picker.
   if (settings.filePath) {
     // The persisted path was user-selected previously — approve it (Fix #6).
-    approveFilePath(settings.filePath);
-    watchFile(settings.filePath);
+    const approved = approveFilePath(settings.filePath);
+    startWatchingFile(approved);
+    createWindow(approved);
+  } else {
+    createWindow('');
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      const current = loadSettings();
+      if (current.filePath) {
+        const approved = approveFilePath(current.filePath);
+        startWatchingFile(approved);
+        createWindow(approved);
+      } else {
+        createWindow('');
+      }
+    }
   });
 });
 
@@ -1498,5 +1750,8 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  if (watchInterval) clearInterval(watchInterval);
+  for (const entry of watchers.values()) clearInterval(entry.interval);
+  watchers.clear();
+  for (const entry of watchdogs.values()) clearInterval(entry.interval);
+  watchdogs.clear();
 });
