@@ -3,6 +3,8 @@
 > **Your AI agents. One floating command deck.**
 > Write tasks in Markdown. Watch AI knock them out. Checkboxes tick themselves.
 
+English · [中文](./README_zh.md)
+
 TickFlow is a always-on-top macOS widget that turns a plain `task.md` into a live mission control for your AI coding agents. Drop in your tasks, hit execute, and TickFlow drives **Claude, Codex, or any CLI agent** through them inside a real terminal session — checking off boxes in real time while you do literally anything else.
 
 No copy-paste. No babysitting. No context-switching. Just a tiny glass panel hovering over your work, quietly getting things done.
