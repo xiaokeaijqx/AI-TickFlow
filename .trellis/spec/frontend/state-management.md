@@ -203,6 +203,43 @@ The `ResizeHandle` component enables drag-to-resize for sidebars:
 
 ---
 
+## Design Decision: long-running agent batches — advisory idle notice, never auto-stop
+
+**Context**: A batch hands work to an external agent that can legitimately run a
+very long time (downloads, installs, compiles). We need to surface a possibly-
+stuck agent WITHOUT falsely interrupting legitimate long work.
+
+**Options considered**:
+1. Fixed max total-duration timeout → auto-pause/stop the batch. Rejected: a
+   25-minute legitimate download would be killed. Total elapsed time is the
+   wrong axis.
+2. Idle (no-new-output) detection, advisory only. Chosen.
+
+**Decision**:
+- The stall watchdog (`electron/main.ts`, `STALL_TIMEOUT_MS`) measures **time
+  since the tmux pane last produced NEW output**, not total elapsed time. Any
+  output (a download's progress lines) resets it, so active long work never
+  trips it. Threshold is **20 minutes** of silence.
+- When it trips, it ONLY emits an advisory `agent-idle-warning` — it NEVER
+  auto-pauses, auto-advances, or kills the agent. The batch keeps running; if
+  the agent resumes output, `DONE N` markers are still parsed normally.
+- The idle banner (`AgentPanel.tsx`) is **notice-only**: message + a ✕ that
+  dismisses it and calls `resetStallTimer()`. It has NO stop button.
+
+**Single stop entry point**: stopping a run is done ONLY via the bottom-bar
+Stop Batch / Stop Run, which calls `store.stopCurrentBatch()` → `advanceQueue()`
+(marks tasks stopped, cleans `runningBatchId`/`isExecuting`, promotes the next
+queued batch). 
+
+> **Don't**: wire a second "stop" affordance (e.g. an idle-banner button) to a
+> bare agent-kill IPC like `stopIdleAgent` (Ctrl-C only). It kills the tmux
+> process but leaves the renderer batch state (`runningBatchId`, `isExecuting`)
+> untouched, wedging the queue at "running" forever. Every stop path MUST go
+> through `stopCurrentBatch()` so the queue state is reconciled. Keep stop to a
+> single source of truth.
+
+---
+
 ## App Preferences Context (User settings)
 
 Use `AppPreferencesContext` for **user preferences** that persist across sessions:
