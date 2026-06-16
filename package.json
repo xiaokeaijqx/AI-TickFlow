@@ -36,6 +36,7 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": "dmg",
+      "icon": "build/icon.icns",
       "entitlements": "entitlements.mac.plist",
       "extendInfo": {
         "NSBluetoothAlwaysUsageDescription": "",
