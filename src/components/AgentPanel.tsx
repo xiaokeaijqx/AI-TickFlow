@@ -344,25 +344,18 @@ export default function AgentPanel({
 
       {!store.agentError && stallMessage && (
         <div className="shrink-0 border-x border-yellow-500/20 bg-yellow-500/5 px-2.5 py-1.5">
-          <p className="text-[11px] text-yellow-600 mb-1.5">{stallMessage}</p>
-          <div className="flex gap-1.5">
+          <div className="flex items-start gap-1.5">
+            <p className="flex-1 text-[11px] text-yellow-600">{stallMessage}</p>
             <button
               onClick={async () => {
                 clearGlobalStallMessage();
                 await window.electronAPI.resetStallTimer();
               }}
-              className="flex-1 rounded-md bg-yellow-500/10 px-2 py-1 text-[11px] font-medium text-yellow-700 hover:bg-yellow-500/20 transition-colors"
+              title="Dismiss"
+              aria-label="Dismiss"
+              className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-yellow-700 hover:bg-yellow-500/20 transition-colors"
             >
-              Continue
-            </button>
-            <button
-              onClick={async () => {
-                clearGlobalStallMessage();
-                await window.electronAPI.stopIdleAgent(store.filePath!);
-              }}
-              className="flex-1 rounded-md bg-red-500/10 px-2 py-1 text-[11px] font-medium text-red-600 hover:bg-red-500/15 transition-colors"
-            >
-              Stop Agent
+              ✕
             </button>
           </div>
         </div>

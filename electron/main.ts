@@ -635,7 +635,7 @@ async function pastePrompt(sessionName: string, prompt: string): Promise<void> {
 
 // ─── Stall Watchdog ─────────────────────────────────────────────────
 
-const STALL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const STALL_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 const STALL_CHECK_INTERVAL_MS = 30_000; // Check every 30 seconds
 
 let stallWatchdogInterval: NodeJS.Timeout | null = null;
@@ -677,7 +677,7 @@ function startStallWatchdog(sessionName: string): void {
         // Agent idle — warn user but do NOT auto-kill
         idleWarningEmitted = true;
 
-        const message = `Agent idle (no output for ${Math.round(stalledDuration / 1000)}s). Continue or stop?`;
+        const message = `代理已约 ${Math.round(stalledDuration / 60000)} 分钟无新输出（可能已完成未上报或卡住）。如需停止，请点下方 Stop 按钮。`;
         console.warn(message);
 
         if (mainWindow && !mainWindow.isDestroyed()) {
