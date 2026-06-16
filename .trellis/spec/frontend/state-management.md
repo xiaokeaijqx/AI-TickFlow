@@ -240,6 +240,42 @@ queued batch).
 
 ---
 
+## Manual takeover of the agent session (boundary behavior)
+
+The user can talk to the agent directly (TickFlow's message input, or typing
+into the tmux pane) while no batch is running ("idle takeover"). What is and
+isn't affected when a batch later runs:
+
+**Task-tracking is protected — manual chat cannot cause false completions:**
+- DONE parsing is gated on `state.isExecuting && state.runningBatchId`
+  (`taskStore.refreshAgentLog`). While idle (no running batch), `DONE N` /
+  `WAIT_APPROVAL` text in a manual conversation is NEVER parsed → no task is
+  written.
+- Each batch sets a fresh unique sentinel (`batchSentinel(batch.id)`) at send
+  time and `parseTaskCompletedIndices` only counts markers AFTER the sentinel's
+  last occurrence. All prior manual-chat output sits before the new sentinel and
+  is ignored. So "idle takeover → run task" is clean on the tracking side.
+
+**Agent CONTEXT is shared — this is the real impact:**
+- TickFlow reuses ONE agent process/session. A manual idle conversation becomes
+  part of the agent's context, so a subsequently-sent task prompt is appended to
+  that conversation — the agent acts with that memory (can help or mislead). This
+  is inherent to a single shared session, not a bug. To isolate, use
+  **Restart Agent** (kills + respawns the session) before running the task.
+
+**Operational caveat — leave the agent at its ready prompt:**
+- Task prompts are delivered by PASTING into the tmux pane. If manual interaction
+  left the agent in a non-ready sub-state (a y/n confirm, a pager/REPL, a
+  half-typed line), the pasted prompt lands in the wrong place. `ensureAgentSession`
+  only checks `pane_current_command`, not sub-modes. Return the agent to its empty
+  ready prompt before letting a batch run.
+
+**Cosmetic only:** during idle, `WAIT_APPROVAL`/approval phrases in manual chat
+may briefly flip the status badge via `getStatusFromLog`, but with no running
+batch nothing is written; it self-corrects on the next poll.
+
+---
+
 ## App Preferences Context (User settings)
 
 Use `AppPreferencesContext` for **user preferences** that persist across sessions:
