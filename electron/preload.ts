@@ -52,6 +52,7 @@ const electronAPI: ElectronAPI = {
   getAgentConfig: () => invokeWithTimeout('get-agent-config', 10_000),
   setAgentConfig: (config: AgentConfig) => invokeWithTimeout('set-agent-config', 10_000, config),
   ensureAgentSession: (filePath: string) => invokeWithTimeout('ensure-agent-session', 30_000, filePath),
+  restartAgent: (filePath: string) => invokeWithTimeout('restart-agent', 30_000, filePath),
   executeWithAI: (filePath: string, task?: Task) => invokeWithTimeout('execute-with-ai', 30_000, filePath, task),
   captureAgentLog: (filePath: string) => invokeWithTimeout('capture-agent-log', 15_000, filePath),
   sendAgentApproval: (filePath: string, decision: ApprovalDecision) =>

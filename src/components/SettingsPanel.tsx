@@ -234,6 +234,21 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
         </div>
 
         <div>
+          <label className="text-tick-text-dim text-xs mb-1 block">Agent Process</label>
+          <button
+            onClick={() => {
+              void store.restartAgent();
+            }}
+            className="w-full rounded-md border border-[#DDE1E8] bg-white px-2 py-1.5 text-xs font-medium text-tick-text transition-colors hover:bg-[#EAEAED] hover:border-[#C9CED8]"
+          >
+            Restart Agent
+          </button>
+          <p className="mt-1 text-tick-text-dim text-xs">
+            切换模型/配置（如 ccswitch）后点此重启 agent 使新配置生效。
+          </p>
+        </div>
+
+        <div>
           <label className="text-tick-text-dim text-xs mb-1 block">App</label>
           <button
             onClick={async () => {

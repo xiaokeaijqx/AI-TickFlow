@@ -45,6 +45,7 @@ export interface TaskStore {
   setAgentConfig: (config: AgentConfig) => Promise<void>;
   loadProjectBinding: () => Promise<void>;
   ensureAgentSession: () => Promise<void>;
+  restartAgent: () => Promise<void>;
   setTasks: (tasks: Task[]) => void;
   toggleTask: (lineNumber: number) => Promise<void>;
   addTask: (title: string) => Promise<void>;
@@ -346,6 +347,51 @@ const createStore = () => {
         projectBinding: result.binding,
         agentStatus: result.success ? (state.isExecuting ? state.agentStatus : 'idle') : 'error',
         agentError: result.success ? null : result.error ?? 'Failed to start agent session',
+      };
+      notify();
+    },
+
+    restartAgent: async () => {
+      const filePath = state.filePath;
+      if (!filePath) return;
+
+      // Restarting kills the tmux session and spawns a FRESH agent, which
+      // abandons whatever the old agent was doing. Mirror the reset done by
+      // setAgentConfig's shouldRestartAgent branch so the queue doesn't wedge
+      // at "running". Reset module-level dedup vars too.
+      hasNotifiedCompletion = false;
+      handledApprovalMarkerIndex = -1;
+      handledBatchCompletedIndex = -1;
+      completedTaskIndices = new Set();
+      doneParseBaseline = -1;
+      state = {
+        ...state,
+        agentStatus: 'idle',
+        agentLog: '',
+        agentError: null,
+        agentStallMessage: null,
+        lastLogChangeTimestamp: 0,
+        isExecuting: false,
+        currentRunId: null,
+        snapshotTasks: [],
+        currentTaskIndex: -1,
+        selectedLineNumbers: new Set(),
+        batches: [],
+        queuedLineNumbers: new Set(),
+        runningBatchId: null,
+        nextBatchNumber: 1,
+      };
+      notify();
+      // Persist the cleared batch state so a stale persisted batch can't
+      // resurrect on next launch.
+      persistRuntime();
+
+      const result = await window.electronAPI.restartAgent(filePath);
+      state = {
+        ...state,
+        projectBinding: result.binding,
+        agentStatus: result.success ? 'idle' : 'error',
+        agentError: result.success ? null : result.error ?? 'Failed to restart agent',
       };
       notify();
     },

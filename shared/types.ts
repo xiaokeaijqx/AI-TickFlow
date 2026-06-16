@@ -140,6 +140,7 @@ export interface ElectronAPI {
   getAgentConfig: () => Promise<AgentConfig>;
   setAgentConfig: (config: AgentConfig) => Promise<AgentConfig>;
   ensureAgentSession: (filePath: string) => Promise<AgentSessionResult>;
+  restartAgent: (filePath: string) => Promise<AgentSessionResult>;
   executeWithAI: (filePath: string, task?: Task) => Promise<AgentExecutionResult>;
   captureAgentLog: (filePath: string) => Promise<AgentLogResult>;
   sendAgentApproval: (filePath: string, decision: ApprovalDecision) => Promise<AgentExecutionResult>;

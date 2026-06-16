@@ -1261,6 +1261,20 @@ function setupIPC() {
     return await ensureAgentSession(filePath);
   });
 
+  ipcMain.handle('restart-agent', async (_event, filePath: string) => {
+    const binding = getProjectBinding(filePath);
+    try {
+      stopStallWatchdog();
+      if (await hasTmuxSession(binding.tmuxSession)) {
+        await runTmux(['kill-session', '-t', binding.tmuxSession]);
+      }
+    } catch (error) {
+      console.error('Failed to kill agent session on restart:', getCommandErrorMessage(error));
+    }
+    // Recreate a fresh session running the (possibly newly-configured) agent.
+    return await ensureAgentSession(filePath);
+  });
+
   ipcMain.handle('execute-with-ai', async (_event, filePath: string, task?: Task) => {
     return await executeAgentTasks(filePath, task);
   });
