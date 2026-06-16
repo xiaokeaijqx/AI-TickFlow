@@ -25,7 +25,7 @@ export default function CollapsedView({ onExpand }: Props) {
       className="tick-glass drag-region flex h-full w-full cursor-pointer items-center justify-center transition-all hover:shadow-[0_18px_38px_rgba(32,38,50,0.14)]"
       onClick={onExpand}
     >
-      <div className="no-drag rounded-lg border border-transparent px-4 py-3 text-center transition-colors hover:border-[#DDE1E8] hover:bg-[#EAEAED]">
+      <div className="no-drag rounded-lg border border-transparent px-3 py-1.5 text-center transition-colors hover:border-[#DDE1E8] hover:bg-[#EAEAED]">
         {allDone ? (
           <span
             key={completeKey}
