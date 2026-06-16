@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, dialog, Notification } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, dialog, Notification, session } from 'electron';
 import type { OpenDialogOptions } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -100,8 +100,64 @@ function saveSettings(settings: Partial<AppSettings>) {
   fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2));
 }
 
+// Fix #6: Allowlist of RESOLVED file paths the renderer is permitted to touch.
+// A path enters this set only when the USER explicitly chose it (file dialog,
+// set-default-file-path) or it was a previously user-selected path persisted in
+// settings. This blocks a compromised renderer from passing arbitrary paths.
+const approvedFilePaths = new Set<string>();
+
+function approveFilePath(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  approvedFilePaths.add(resolved);
+  return resolved;
+}
+
+function assertApprovedFile(filePath: string): string | null {
+  if (typeof filePath !== 'string' || filePath.length === 0) return null;
+  const resolved = path.resolve(filePath);
+  if (!approvedFilePaths.has(resolved)) {
+    console.warn(`Rejected unapproved file path: ${resolved}`);
+    return null;
+  }
+  return resolved;
+}
+
 let mainWindow: BrowserWindow | null = null;
 let expandedWindowBounds: Rectangle | null = null;
+
+const DEV_SERVER_URL = 'http://localhost:5173';
+
+function isDevMode(): boolean {
+  return process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
+}
+
+function buildCspHeader(): string {
+  if (isDevMode()) {
+    // Relaxed CSP so Vite HMR (ws), eval-based HMR, and inline dev assets work.
+    return [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:*",
+      "style-src 'self' 'unsafe-inline' http://localhost:*",
+      "img-src 'self' data:",
+      "connect-src 'self' ws://localhost:* http://localhost:*",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+    ].join('; ');
+  }
+
+  // Strict production CSP. 'unsafe-inline' on style-src is required for Tailwind / inline styles.
+  return [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -126,9 +182,36 @@ function createWindow() {
     },
   });
 
+  // Fix #4: Set a Content-Security-Policy on every response. Registered once
+  // here, before content loads. Header is dev/prod aware so Vite HMR keeps working.
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [buildCspHeader()],
+      },
+    });
+  });
+
+  // Fix #5: Harden the renderer against navigation / new-window escapes.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    // Allow only the legitimate app URL (dev server in dev, file URL in prod).
+    if (isDevMode()) {
+      if (!url.startsWith(DEV_SERVER_URL)) {
+        event.preventDefault();
+      }
+    } else if (!url.startsWith('file://')) {
+      event.preventDefault();
+    }
+  });
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault();
+  });
+
   // In dev mode, load from Vite dev server
-  if (process.env.NODE_ENV === 'development' || process.argv.includes('--dev')) {
-    mainWindow.loadURL('http://localhost:5173');
+  if (isDevMode()) {
+    mainWindow.loadURL(DEV_SERVER_URL);
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
@@ -209,12 +292,35 @@ function parseTasks(markdown: string): Task[] {
   return tasks;
 }
 
+// Fix #9: cap file size before synchronous reads so a pathological
+// multi-hundred-MB file cannot freeze the main process. readTasks is the
+// central read used by the watcher/poll path, so all callers benefit.
+const MAX_TASK_FILE_BYTES = 5 * 1024 * 1024;
+
 function readTasks(filePath: string): TaskFileInfo {
   if (!fs.existsSync(filePath)) {
     return { path: filePath, tasks: [] };
   }
+  const size = fs.statSync(filePath).size;
+  if (size > MAX_TASK_FILE_BYTES) {
+    console.warn(`Task file exceeds ${MAX_TASK_FILE_BYTES} bytes (${size}); skipping read: ${filePath}`);
+    return { path: filePath, tasks: [] };
+  }
   const content = fs.readFileSync(filePath, 'utf-8');
   return { path: filePath, tasks: parseTasks(content) };
+}
+
+// Guarded full-file read shared by the write-path helpers. Returns null when
+// the file is missing or exceeds the size cap (Fix #9), so callers no-op
+// instead of freezing the main process on a pathological file.
+function readFileGuarded(filePath: string): string | null {
+  if (!fs.existsSync(filePath)) return null;
+  const size = fs.statSync(filePath).size;
+  if (size > MAX_TASK_FILE_BYTES) {
+    console.warn(`Task file exceeds ${MAX_TASK_FILE_BYTES} bytes (${size}); skipping read: ${filePath}`);
+    return null;
+  }
+  return fs.readFileSync(filePath, 'utf-8');
 }
 
 // Same task-line regex used by parseTasks: captures [ /x] state and title.
@@ -226,10 +332,9 @@ function toggleTaskStatus(
   completed: boolean,
   expectedTitle?: string
 ): void {
-  if (!fs.existsSync(filePath)) return;
-
   // Read fresh so concurrent agent edits to OTHER lines are preserved.
-  const content = fs.readFileSync(filePath, 'utf-8');
+  const content = readFileGuarded(filePath);
+  if (content === null) return;
   const lines = content.split('\n');
 
   const wantedTitle = expectedTitle?.trim();
@@ -294,7 +399,8 @@ function appendTaskToFile(filePath: string, title: string): Task | null {
     fs.writeFileSync(filePath, `# Tasks\n\n`, 'utf-8');
   }
 
-  const content = fs.readFileSync(filePath, 'utf-8');
+  const content = readFileGuarded(filePath);
+  if (content === null) return null;
   const lines = content.split('\n');
   const newLineNumber = lines.length;
 
@@ -444,7 +550,10 @@ function getShellPathPrefix(): string {
   return `export PATH="/opt/homebrew/bin:/usr/local/bin:${userLocalBin}:$PATH";`;
 }
 
-const UNSAFE_SHELL_PATTERNS = /[;&|`$<>\\]/;
+// Reject shell metacharacters plus newline/CR and other control chars
+// (\x00-\x1f) — a newline lets an attacker start a whole new shell command.
+// Spaces are intentionally allowed so commands can carry flags/args.
+const UNSAFE_SHELL_PATTERNS = /[;&|`$<>\\\n\r\x00-\x1f]/;
 
 function validateCustomCommand(command: string): string | null {
   if (!command) return 'Custom command is empty';
@@ -991,17 +1100,17 @@ async function stopAgent(filePath: string): Promise<AgentExecutionResult> {
 }
 
 function clearCompletedFromFile(filePath: string): void {
-  if (!fs.existsSync(filePath)) return;
-  const content = fs.readFileSync(filePath, 'utf-8');
+  const content = readFileGuarded(filePath);
+  if (content === null) return;
   const lines = content.split('\n');
   const filtered = lines.filter((line) => !/^[\s]*- \[x\] .+/.test(line));
   fs.writeFileSync(filePath, filtered.join('\n'), 'utf-8');
 }
 
 function deleteTaskFromFile(filePath: string, lineNumber: number): string | null {
-  if (!fs.existsSync(filePath)) return null;
+  const content = readFileGuarded(filePath);
+  if (content === null) return null;
 
-  const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
 
   if (lineNumber < 0 || lineNumber >= lines.length) return null;
@@ -1013,9 +1122,8 @@ function deleteTaskFromFile(filePath: string, lineNumber: number): string | null
 }
 
 function undoDeleteTask(filePath: string, lineNumber: number, lineContent: string): void {
-  if (!fs.existsSync(filePath)) return;
-
-  const content = fs.readFileSync(filePath, 'utf-8');
+  const content = readFileGuarded(filePath);
+  if (content === null) return;
   const lines = content.split('\n');
 
   // Re-insert at original position (or end if position no longer valid)
@@ -1025,9 +1133,8 @@ function undoDeleteTask(filePath: string, lineNumber: number, lineContent: strin
 }
 
 function editTaskTitle(filePath: string, lineNumber: number, newTitle: string): void {
-  if (!fs.existsSync(filePath)) return;
-
-  const content = fs.readFileSync(filePath, 'utf-8');
+  const content = readFileGuarded(filePath);
+  if (content === null) return;
   const lines = content.split('\n');
 
   if (lineNumber < 0 || lineNumber >= lines.length) return;
@@ -1097,29 +1204,38 @@ function setupIPC() {
       ? await dialog.showOpenDialog(mainWindow, dialogOptions)
       : await dialog.showOpenDialog(dialogOptions);
     if (result.canceled || result.filePaths.length === 0) return null;
-    const filePath = result.filePaths[0];
+    // Dialog result is trusted (the user explicitly chose it) — approve & persist.
+    const filePath = approveFilePath(result.filePaths[0]);
     saveSettings({ filePath });
     watchFile(filePath);
     return filePath;
   });
 
   ipcMain.handle('read-task-file', (_event, filePath: string) => {
-    return readTasks(filePath);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return { path: filePath, tasks: [] };
+    return readTasks(approved);
   });
 
   ipcMain.handle(
     'write-task-status',
     (_event, filePath: string, lineNumber: number, completed: boolean, expectedTitle?: string) => {
-      toggleTaskStatus(filePath, lineNumber, completed, expectedTitle);
+      const approved = assertApprovedFile(filePath);
+      if (!approved) return;
+      toggleTaskStatus(approved, lineNumber, completed, expectedTitle);
     }
   );
 
   ipcMain.handle('append-task', (_event, filePath: string, title: string) => {
-    return appendTaskToFile(filePath, title);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return null;
+    return appendTaskToFile(approved, title);
   });
 
   ipcMain.handle('get-project-binding', (_event, filePath: string) => {
-    return getProjectBinding(filePath);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return null;
+    return getProjectBinding(approved);
   });
 
   ipcMain.handle('get-agent-config', () => {
@@ -1128,6 +1244,15 @@ function setupIPC() {
 
   ipcMain.handle('set-agent-config', (_event, config: AgentConfig) => {
     const agentConfig = normalizeAgentConfig(config);
+    // Fix #7: never persist an unsafe custom command. Reject the change and
+    // return the current (unchanged) config so the renderer reflects reality.
+    if (agentConfig.provider === 'custom') {
+      const validationError = validateCustomCommand(agentConfig.customCommand.trim());
+      if (validationError) {
+        console.warn(`Rejected unsafe custom command: ${validationError}`);
+        return loadSettings().agentConfig;
+      }
+    }
     saveSettings({ agentConfig });
     return agentConfig;
   });
@@ -1165,19 +1290,27 @@ function setupIPC() {
   });
 
   ipcMain.handle('clear-completed-tasks', async (_event, filePath: string) => {
-    clearCompletedFromFile(filePath);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return;
+    clearCompletedFromFile(approved);
   });
 
   ipcMain.handle('delete-task', (_event, filePath: string, lineNumber: number) => {
-    return deleteTaskFromFile(filePath, lineNumber);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return null;
+    return deleteTaskFromFile(approved, lineNumber);
   });
 
   ipcMain.handle('undo-delete-task', (_event, filePath: string, lineNumber: number, lineContent: string) => {
-    undoDeleteTask(filePath, lineNumber, lineContent);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return;
+    undoDeleteTask(approved, lineNumber, lineContent);
   });
 
   ipcMain.handle('edit-task-title', (_event, filePath: string, lineNumber: number, newTitle: string) => {
-    editTaskTitle(filePath, lineNumber, newTitle);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return;
+    editTaskTitle(approved, lineNumber, newTitle);
   });
 
   ipcMain.handle('get-default-file-path', () => {
@@ -1185,8 +1318,10 @@ function setupIPC() {
   });
 
   ipcMain.handle('set-default-file-path', (_event, filePath: string) => {
-    saveSettings({ filePath });
-    watchFile(filePath);
+    // Renderer only calls this with the user-selected default path — approve it (Fix #6).
+    const approved = approveFilePath(filePath);
+    saveSettings({ filePath: approved });
+    watchFile(approved);
   });
 
   ipcMain.handle('get-shortcut', () => {
@@ -1210,7 +1345,9 @@ function setupIPC() {
   });
 
   ipcMain.handle('refresh-tasks', (_event, filePath: string) => {
-    return readTasks(filePath);
+    const approved = assertApprovedFile(filePath);
+    if (!approved) return { path: filePath, tasks: [] };
+    return readTasks(approved);
   });
 
   ipcMain.handle('set-window-collapsed', (_event, collapsed: boolean) => {
@@ -1311,6 +1448,8 @@ app.whenReady().then(() => {
   const settings = loadSettings();
   registerShortcut(settings.shortcut);
   if (settings.filePath) {
+    // The persisted path was user-selected previously — approve it (Fix #6).
+    approveFilePath(settings.filePath);
     watchFile(settings.filePath);
   }
 
