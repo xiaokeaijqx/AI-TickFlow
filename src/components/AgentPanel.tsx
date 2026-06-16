@@ -308,28 +308,6 @@ export default function AgentPanel({
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
-          {store.agentStatus === 'waitingApproval' && (
-            <>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void store.sendApproval('approve');
-                }}
-                className="rounded-md bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-500/20"
-              >
-                Approve
-              </button>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void store.sendApproval('reject');
-                }}
-                className="rounded-md bg-red-500/10 px-2.5 py-1 text-xs font-semibold text-red-700 transition-colors hover:bg-red-500/20"
-              >
-                Reject
-              </button>
-            </>
-          )}
           <PanelToggleButton collapsed={collapsed} onToggle={onToggleCollapse} />
         </div>
       </div>
@@ -340,7 +318,35 @@ export default function AgentPanel({
         </div>
       )}
 
-      {!store.agentError && stallMessage && (
+      {store.agentStatus === 'waitingApproval' && (
+        <div className="shrink-0 border-x border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5">
+          <div className="flex items-center gap-2">
+            <p className="flex-1 text-[11px] font-semibold text-amber-700">
+              Agent 请求审批以继续 / Agent is waiting for approval
+            </p>
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                void store.sendApproval('approve');
+              }}
+              className="shrink-0 rounded-md bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-700 transition-colors hover:bg-emerald-500/25"
+            >
+              Approve
+            </button>
+            <button
+              onClick={(event) => {
+                event.stopPropagation();
+                void store.sendApproval('reject');
+              }}
+              className="shrink-0 rounded-md bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-700 transition-colors hover:bg-red-500/25"
+            >
+              Reject
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!store.agentError && store.agentStatus !== 'waitingApproval' && stallMessage && (
         <div className="shrink-0 border-x border-yellow-500/20 bg-yellow-500/5 px-2.5 py-1.5">
           <div className="flex items-start gap-1.5">
             <p className="flex-1 text-[11px] text-yellow-600">{stallMessage}</p>

@@ -222,6 +222,10 @@ function isValidBatchRuntime(runtime: unknown): runtime is BatchRuntimeState {
 const createStore = () => {
   let hasNotifiedCompletion = false;
   let handledApprovalMarkerIndex = -1;
+  // Tracks the last WAIT_APPROVAL marker index we already notified for, so the
+  // desktop notification fires exactly once per distinct approval request and
+  // not on every 1s poll while approval stays pending.
+  let notifiedApprovalIndex = -1;
   let handledBatchCompletedIndex = -1;
   let completedTaskIndices = new Set<number>();
   // Character offset in the agent log captured when a batch is sent. Only DONE
@@ -259,6 +263,7 @@ const createStore = () => {
     setFilePath: (path: string) => {
       hasNotifiedCompletion = false;
       handledApprovalMarkerIndex = -1;
+      notifiedApprovalIndex = -1;
       state = {
         ...state,
         filePath: path,
@@ -600,6 +605,19 @@ const createStore = () => {
         );
         const isFinished = nextStatus === 'idle' && state.isExecuting;
 
+        // Edge-triggered approval notification: fire exactly once per distinct
+        // approval request. The marker index changes for each new WAIT_APPROVAL,
+        // so a different index means a new request. This must run regardless of
+        // batch mode (a batch can still hit a genuine approval prompt).
+        if (nextStatus === 'waitingApproval') {
+          const cleanLog = newLog.replace(/\x1b\[[0-9;:]*m/g, '');
+          const approvalIndex = getLastLineMarkerIndex(cleanLog, 'WAIT_APPROVAL');
+          if (approvalIndex >= 0 && approvalIndex !== notifiedApprovalIndex) {
+            notifiedApprovalIndex = approvalIndex;
+            void window.electronAPI.notifyApproval();
+          }
+        }
+
         // Check for DONE N markers. parseTaskCompletedIndices strips ANSI codes
         // and tolerates leading indentation, so TUI-rendered "  DONE 1" is matched.
         // The /DONE (\d+)/ regex inherently skips the template's "DONE N" (letter N).
@@ -704,11 +722,22 @@ const createStore = () => {
           const isBatchMode = state.runningBatchId && state.batches.length > 0;
           const effectiveIsFinished = isFinished && !isBatchMode;
 
+          // In batch mode we force 'running' to suppress a false
+          // ALL_TASKS_COMPLETED auto-finish — BUT a genuine pending
+          // WAIT_APPROVAL must still surface (otherwise the batch silently
+          // hangs on an approval prompt). So let waitingApproval win over the
+          // forced 'running'; only idle (the false-completion case) is masked.
+          const effectiveStatus = isBatchMode
+            ? nextStatus === 'waitingApproval'
+              ? 'waitingApproval'
+              : 'running'
+            : nextStatus;
+
           state = {
             ...state,
             projectBinding: result.binding,
             agentLog: newLog,
-            agentStatus: isBatchMode ? 'running' : nextStatus,
+            agentStatus: effectiveStatus,
             agentError: null,
             lastLogChangeTimestamp,
             isExecuting: effectiveIsFinished ? false : state.isExecuting,
@@ -738,6 +767,8 @@ const createStore = () => {
       const result = await window.electronAPI.sendAgentApproval(filePath, decision);
       if (result.success) {
         handledApprovalMarkerIndex = getLastLineMarkerIndex(state.agentLog, 'WAIT_APPROVAL');
+        // Reset so the next distinct WAIT_APPROVAL re-notifies.
+        notifiedApprovalIndex = -1;
       }
       state = {
         ...state,
@@ -1199,6 +1230,7 @@ const createStore = () => {
     if (!filePath) return;
 
     handledApprovalMarkerIndex = -1;
+    notifiedApprovalIndex = -1;
     handledBatchCompletedIndex = -1;
     // doneParseBaseline is deprecated: DONE markers are now anchored on this
     // batch's relative sentinel (batchSentinel(batch.id)) re-located each poll,

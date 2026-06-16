@@ -151,6 +151,7 @@ export interface ElectronAPI {
   executeBatchPrompt: (filePath: string, batchNumber: number, batchTasks: Task[], batchId: string) => Promise<BatchExecutionResult>;
   clearCompletedTasks: (filePath: string) => Promise<void>;
   notifyComplete: () => Promise<void>;
+  notifyApproval: () => Promise<void>;
   getSystemSounds: () => Promise<string[]>;
   setNotificationSound: (sound: string) => Promise<void>;
   getNotificationSound: () => Promise<string>;

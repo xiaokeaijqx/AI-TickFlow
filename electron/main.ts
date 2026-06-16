@@ -1414,6 +1414,25 @@ function setupIPC() {
     });
   });
 
+  ipcMain.handle('notify-approval', () => {
+    const notification = new Notification({
+      title: 'TickFlow',
+      body: '需要审批才能继续 / Approval needed',
+      silent: false,
+    });
+    notification.show();
+
+    const settings = loadSettings();
+    const soundPath = path.join('/System/Library/Sounds', settings.notificationSound);
+    // Use execFile (no shell) so any metacharacters in the sound name are inert.
+    execFile('afplay', [soundPath], (error) => {
+      if (error) {
+        // Fallback to Glass if preferred sound fails
+        execFile('afplay', ['/System/Library/Sounds/Glass.aiff'], () => {});
+      }
+    });
+  });
+
   ipcMain.handle('get-system-sounds', () => {
     try {
       return fs.readdirSync('/System/Library/Sounds')

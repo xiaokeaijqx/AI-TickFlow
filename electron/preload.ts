@@ -65,6 +65,7 @@ const electronAPI: ElectronAPI = {
   clearCompletedTasks: (filePath: string) =>
     invokeWithTimeout<void>('clear-completed-tasks', 10_000, filePath),
   notifyComplete: () => invokeWithTimeout<void>('notify-complete', 10_000),
+  notifyApproval: () => invokeWithTimeout<void>('notify-approval', 5_000),
   getSystemSounds: () => invokeWithTimeout<string[]>('get-system-sounds', 5_000),
   setNotificationSound: (sound: string) => invokeWithTimeout<void>('set-notification-sound', 5_000, sound),
   getNotificationSound: () => invokeWithTimeout<string>('get-notification-sound', 5_000),
