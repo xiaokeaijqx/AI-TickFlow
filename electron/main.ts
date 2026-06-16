@@ -41,6 +41,7 @@ const DEFAULT_AGENT_CONFIG: AgentConfig = {
   provider: 'codex',
   customCommand: '',
   showTerminalControls: true,
+  skipPermissions: false,
 };
 
 function normalizeAgentConfig(value: unknown): AgentConfig {
@@ -50,7 +51,7 @@ function normalizeAgentConfig(value: unknown): AgentConfig {
 
   const maybeConfig = value as Partial<AgentConfig>;
   const provider = maybeConfig.provider;
-  const allowedProviders: AgentProvider[] = ['codex', 'claude', 'cmux-codex', 'cmux-claude', 'custom'];
+  const allowedProviders: AgentProvider[] = ['codex', 'claude', 'custom'];
 
   return {
     provider: provider && allowedProviders.includes(provider) ? provider : DEFAULT_AGENT_CONFIG.provider,
@@ -58,6 +59,9 @@ function normalizeAgentConfig(value: unknown): AgentConfig {
     showTerminalControls: typeof maybeConfig.showTerminalControls === 'boolean'
       ? maybeConfig.showTerminalControls
       : DEFAULT_AGENT_CONFIG.showTerminalControls,
+    skipPermissions: typeof maybeConfig.skipPermissions === 'boolean'
+      ? maybeConfig.skipPermissions
+      : DEFAULT_AGENT_CONFIG.skipPermissions,
   };
 }
 
@@ -419,7 +423,6 @@ function appendTaskToFile(filePath: string, title: string): Task | null {
 // ─── Codex Agent via tmux ─────────────────────────────────────
 
 const TMUX_BIN_CANDIDATES = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', 'tmux'];
-const CMUX_CLI_PATH = '/Applications/cmux.app/Contents/Resources/bin/cmux';
 const LOG_CAPTURE_LINES = 2000;
 const TMUX_MAX_BUFFER = 1024 * 1024 * 4;
 const PASTE_BUFFER_DELAY_MS = 300;
@@ -570,11 +573,9 @@ function getAgentStartCommand(config: AgentConfig): string {
     case 'codex':
       return `${shellPathPrefix} codex`;
     case 'claude':
-      return `${shellPathPrefix} claude`;
-    case 'cmux-codex':
-      return `${shellPathPrefix} ${shellQuote(CMUX_CLI_PATH)} codex-teams`;
-    case 'cmux-claude':
-      return `${shellPathPrefix} ${shellQuote(CMUX_CLI_PATH)} claude-teams`;
+      return config.skipPermissions
+        ? `${shellPathPrefix} claude --dangerously-skip-permissions`
+        : `${shellPathPrefix} claude`;
     case 'custom':
       return config.customCommand.trim();
     default: {

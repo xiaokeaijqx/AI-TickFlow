@@ -78,7 +78,7 @@ export interface AgentLogResult {
 
 export type ApprovalDecision = 'approve' | 'reject';
 
-export type AgentProvider = 'codex' | 'claude' | 'cmux-codex' | 'cmux-claude' | 'custom';
+export type AgentProvider = 'codex' | 'claude' | 'custom';
 
 export type AgentControlKey = 'Up' | 'Down' | 'Left' | 'Right' | 'Enter' | 'Escape' | 'Tab' | 'Space';
 
@@ -104,6 +104,7 @@ export interface AgentConfig {
   provider: AgentProvider;
   customCommand: string;
   showTerminalControls: boolean;
+  skipPermissions: boolean;
 }
 
 export interface BatchRuntimeState {

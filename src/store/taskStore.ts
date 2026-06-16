@@ -166,6 +166,7 @@ const DEFAULT_AGENT_CONFIG: AgentConfig = {
   provider: 'codex',
   customCommand: '',
   showTerminalControls: true,
+  skipPermissions: false,
 };
 
 /**
@@ -290,7 +291,8 @@ const createStore = () => {
     setAgentConfig: async (config: AgentConfig) => {
       const shouldRestartAgent =
         config.provider !== state.agentConfig.provider ||
-        config.customCommand.trim() !== state.agentConfig.customCommand.trim();
+        config.customCommand.trim() !== state.agentConfig.customCommand.trim() ||
+        config.skipPermissions !== state.agentConfig.skipPermissions;
       const agentConfig = await window.electronAPI.setAgentConfig(config);
       const filePath = state.filePath;
       const projectBinding = filePath

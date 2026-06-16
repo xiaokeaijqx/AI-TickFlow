@@ -10,8 +10,6 @@ interface Props {
 const agentProviderOptions: Array<{ value: AgentProvider; label: string }> = [
   { value: 'codex', label: 'Codex' },
   { value: 'claude', label: 'Claude' },
-  { value: 'cmux-codex', label: 'CMUX Codex Teams' },
-  { value: 'cmux-claude', label: 'CMUX Claude Teams' },
   { value: 'custom', label: 'Custom Command' },
 ];
 
@@ -56,6 +54,7 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
         provider: hasLocalAgentDraft ? current.provider : next.provider,
         customCommand: hasLocalAgentDraft ? current.customCommand : next.customCommand,
         showTerminalControls: next.showTerminalControls,
+        skipPermissions: next.skipPermissions,
       };
     });
     lastSyncedAgentConfigRef.current = next;
@@ -121,11 +120,36 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
     }
   };
 
+  const handleSkipPermissionsChange = async (skipPermissions: boolean) => {
+    setAgentError(null);
+    const nextLocalConfig: AgentConfig = {
+      ...agentConfig,
+      skipPermissions,
+    };
+    const nextStoredConfig: AgentConfig = {
+      ...store.agentConfig,
+      skipPermissions,
+    };
+
+    setLocalAgentConfig(nextLocalConfig);
+    setIsSavingAgent(true);
+    try {
+      await store.setAgentConfig(nextStoredConfig);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : 'Failed to save agent settings.');
+    } finally {
+      setIsSavingAgent(false);
+    }
+  };
+
   const handleAgentConfigSave = async () => {
     const nextConfig: AgentConfig = {
       provider: agentConfig.provider,
       customCommand: agentConfig.customCommand.trim(),
       showTerminalControls: agentConfig.showTerminalControls,
+      skipPermissions: agentConfig.skipPermissions,
     };
 
     if (nextConfig.provider === 'custom' && !nextConfig.customCommand) {
@@ -212,6 +236,24 @@ export default function SettingsPanel({ currentPath, onClose }: Props) {
               placeholder="codex --model gpt-5"
               className="mt-2 w-full rounded-md border border-[#DDE1E8] bg-white px-2 py-1 text-xs text-tick-text outline-none transition-colors placeholder:text-tick-text-dim hover:border-[#C9CED8] hover:bg-white focus:border-tick-accent/50 focus:bg-white"
             />
+          )}
+
+          {agentConfig.provider === 'claude' && (
+            <>
+              <label className="mt-2 flex cursor-pointer items-center justify-between rounded-md border border-[#DDE1E8] bg-white px-2 py-1.5 transition-colors hover:bg-[#EAEAED]">
+                <span className="text-xs font-medium text-tick-text">Skip permissions</span>
+                <input
+                  type="checkbox"
+                  checked={agentConfig.skipPermissions}
+                  disabled={isSavingAgent}
+                  onChange={(event) => void handleSkipPermissionsChange(event.target.checked)}
+                  className="h-4 w-4 accent-tick-accent"
+                />
+              </label>
+              <p className="mt-1 text-tick-text-dim text-xs">
+                跳过权限确认（--dangerously-skip-permissions），无人值守批量执行用。
+              </p>
+            </>
           )}
 
           {agentError && (

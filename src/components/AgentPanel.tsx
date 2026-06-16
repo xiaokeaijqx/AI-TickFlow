@@ -49,8 +49,6 @@ const statusClass: Record<AgentStatus, string> = {
 const providerLabel: Record<AgentProvider, string> = {
   codex: 'Codex',
   claude: 'Claude',
-  'cmux-codex': 'CMUX Codex',
-  'cmux-claude': 'CMUX Claude',
   custom: 'Custom',
 };
 
