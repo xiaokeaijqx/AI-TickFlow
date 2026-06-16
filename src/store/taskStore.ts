@@ -167,6 +167,56 @@ const DEFAULT_AGENT_CONFIG: AgentConfig = {
   showTerminalControls: true,
 };
 
+/**
+ * Validate a persisted BatchRuntimeState before applying it on restore.
+ * Returns false on any malformed field so the caller can bail to clean state
+ * instead of crashing the renderer or writing to wrong task lines. Also rejects
+ * a `runningBatchId` that does not exist among `batches[].id` (stale/forged
+ * reference would otherwise drive writes against a missing batch).
+ */
+function isValidBatchRuntime(runtime: unknown): runtime is BatchRuntimeState {
+  if (typeof runtime !== 'object' || runtime === null) return false;
+  const r = runtime as Record<string, unknown>;
+
+  // batches: array of { id: string, batchNumber: number, tasks: array }
+  if (!Array.isArray(r.batches)) return false;
+  for (const batch of r.batches) {
+    if (typeof batch !== 'object' || batch === null) return false;
+    const b = batch as Record<string, unknown>;
+    if (typeof b.id !== 'string') return false;
+    if (typeof b.batchNumber !== 'number') return false;
+    if (!Array.isArray(b.tasks)) return false;
+  }
+
+  // runningBatchId: null or a string that exists among batch ids
+  if (r.runningBatchId !== null) {
+    if (typeof r.runningBatchId !== 'string') return false;
+    const exists = (r.batches as Array<Record<string, unknown>>).some(
+      (b) => b.id === r.runningBatchId
+    );
+    if (!exists) return false;
+  }
+
+  // Array fields with the expected element types.
+  if (!Array.isArray(r.queuedLineNumbers) || !r.queuedLineNumbers.every(Number.isFinite)) {
+    return false;
+  }
+  if (
+    !Array.isArray(r.completedTaskIndices) ||
+    !r.completedTaskIndices.every((n) => Number.isInteger(n))
+  ) {
+    return false;
+  }
+  if (!Array.isArray(r.snapshotTasks)) return false;
+
+  // isExecuting must be a boolean.
+  if (typeof r.isExecuting !== 'boolean') return false;
+
+  // Numeric fields are coerced/defaulted by the caller, so they need not be
+  // present here — only the structural fields above must be valid.
+  return true;
+}
+
 const createStore = () => {
   let hasNotifiedCompletion = false;
   let handledApprovalMarkerIndex = -1;
@@ -1035,31 +1085,51 @@ const createStore = () => {
       const filePath = state.filePath;
       if (!filePath) return;
 
-      const runtime = await window.electronAPI.getBatchRuntime(filePath);
-      if (!runtime) return;
+      try {
+        const runtime = await window.electronAPI.getBatchRuntime(filePath);
+        if (!runtime) return;
 
-      doneParseBaseline = runtime.doneParseBaseline;
-      completedTaskIndices = new Set(runtime.completedTaskIndices);
-      handledApprovalMarkerIndex = runtime.handledApprovalMarkerIndex;
-      handledBatchCompletedIndex = runtime.handledBatchCompletedIndex;
+        // Validate the persisted shape before trusting it. A corrupt/partial/
+        // forged settings file could otherwise crash the renderer (e.g.
+        // `new Set(5)`, `.map` on a non-array) or restore a stale batch that
+        // writes checkboxes onto the wrong lines. On ANY malformed field, bail
+        // without mutating batch state, leaving the clean post-setTasks state.
+        if (!isValidBatchRuntime(runtime)) {
+          console.warn('restoreBatchRuntime: persisted runtime is malformed; ignoring it.');
+          // Clear the bad entry so it can't repeatedly trip restore.
+          persistRuntime();
+          return;
+        }
 
-      state = {
-        ...state,
-        batches: runtime.batches,
-        runningBatchId: runtime.runningBatchId,
-        queuedLineNumbers: new Set(runtime.queuedLineNumbers),
-        nextBatchNumber: runtime.nextBatchNumber,
-        isExecuting: runtime.isExecuting,
-        snapshotTasks: runtime.snapshotTasks,
-        currentTaskIndex: runtime.currentTaskIndex,
-        currentRunId: runtime.currentRunId,
-        agentStatus: runtime.isExecuting ? 'running' : state.agentStatus,
-      };
-      // Re-merge existing tasks against the restored batch state so task rows
-      // reflect running/queued status immediately (setTasks ran before restore
-      // with empty batch state, marking everything todo/done).
-      state = { ...state, tasks: mergeTasks(state.tasks) };
-      notify();
+        // Coerce numeric fields (default if missing/non-finite).
+        const toInt = (value: unknown, fallback: number): number =>
+          typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+        doneParseBaseline = toInt(runtime.doneParseBaseline, -1);
+        completedTaskIndices = new Set(runtime.completedTaskIndices);
+        handledApprovalMarkerIndex = toInt(runtime.handledApprovalMarkerIndex, -1);
+        handledBatchCompletedIndex = toInt(runtime.handledBatchCompletedIndex, -1);
+
+        state = {
+          ...state,
+          batches: runtime.batches,
+          runningBatchId: runtime.runningBatchId,
+          queuedLineNumbers: new Set(runtime.queuedLineNumbers),
+          nextBatchNumber: toInt(runtime.nextBatchNumber, 1),
+          isExecuting: runtime.isExecuting,
+          snapshotTasks: runtime.snapshotTasks,
+          currentTaskIndex: toInt(runtime.currentTaskIndex, -1),
+          currentRunId: runtime.currentRunId,
+          agentStatus: runtime.isExecuting ? 'running' : state.agentStatus,
+        };
+        // Re-merge existing tasks against the restored batch state so task rows
+        // reflect running/queued status immediately (setTasks ran before restore
+        // with empty batch state, marking everything todo/done).
+        state = { ...state, tasks: mergeTasks(state.tasks) };
+        notify();
+      } catch (error) {
+        console.warn('restoreBatchRuntime failed; leaving clean batch state:', error);
+      }
     },
   };
 

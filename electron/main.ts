@@ -2,7 +2,7 @@ import { app, BrowserWindow, globalShortcut, ipcMain, dialog, Notification } fro
 import type { OpenDialogOptions } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { exec, execFile } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { Rectangle } from 'electron';
 import type {
@@ -1253,10 +1253,11 @@ function setupIPC() {
 
     const settings = loadSettings();
     const soundPath = path.join('/System/Library/Sounds', settings.notificationSound);
-    exec(`afplay "${soundPath}"`, (error) => {
+    // Use execFile (no shell) so any metacharacters in the sound name are inert.
+    execFile('afplay', [soundPath], (error) => {
       if (error) {
         // Fallback to Glass if preferred sound fails
-        exec('afplay /System/Library/Sounds/Glass.aiff', () => {});
+        execFile('afplay', ['/System/Library/Sounds/Glass.aiff'], () => {});
       }
     });
   });
@@ -1276,6 +1277,22 @@ function setupIPC() {
   });
 
   ipcMain.handle('set-notification-sound', (_event, sound: string) => {
+    // Reject renderer-controlled values that could carry shell metacharacters or
+    // path traversal. Must be a bare ".aiff" filename and, when the system sound
+    // directory can be enumerated, an actual member of it. Invalid input is a
+    // no-op (keeps the previously persisted sound) — never persist arbitrary
+    // strings, which would flow into the afplay call.
+    if (typeof sound !== 'string' || !/^[A-Za-z0-9 ._-]+\.aiff$/.test(sound)) {
+      return;
+    }
+    try {
+      const available = fs.readdirSync('/System/Library/Sounds').filter((f) => f.endsWith('.aiff'));
+      if (!available.includes(sound)) {
+        return;
+      }
+    } catch {
+      // If enumeration fails, fall back to the regex check above (already passed).
+    }
     saveSettings({ notificationSound: sound });
   });
 

@@ -33,10 +33,20 @@ const TASK_COMPLETED_REGEX = /^[ \t]*DONE (\d+)[ \t]*$/gm;
  * position is recomputed from the current capture every time, it is immune to
  * offset drift.
  *
- * Fallback: if the sentinel is not found (it scrolled off the top of the 2000-
- * line window) or is null, we collect ALL `DONE N` markers in the capture. The
- * caller's `completedTaskIndices` dedup set is the safety net against
- * re-claiming a marker — so falling back to "claim all" never double-applies.
+ * Three-way behavior depending on `sentinel`:
+ *   1. `sentinel === null` — caller intentionally wants no anchoring: collect
+ *      ALL `DONE N` markers (fromIndex = -1). The caller's
+ *      `completedTaskIndices` dedup set is the safety net against re-claiming.
+ *   2. `sentinel` is a non-null string but NOT found in the capture (it scrolled
+ *      off the top of the 2000-line window on a long batch): claim NOTHING and
+ *      return immediately. We must NOT fall through to "claim all" here, because
+ *      the capture still contains stale `DONE N` markers from PREVIOUS batches,
+ *      and `completedTaskIndices` is reset per batch — so those stale markers
+ *      would be mapped onto the current batch's task list and mark the WRONG
+ *      tasks done (silent corruption, can even falsely auto-advance). A missed
+ *      claim is recoverable: the task stays unchecked and a later poll (with the
+ *      sentinel back in-window) will claim it. Claiming the wrong task is not.
+ *   3. `sentinel` found — anchor as usual: only markers after the sentinel's end.
  *
  * Strips ANSI escape codes first because terminal capture (tmux capture-pane -e)
  * includes color codes, and TUIs like Claude Code render output with leading
@@ -48,13 +58,21 @@ export function parseTaskCompletedIndices(
 ): { indices: number[]; lastMatchIndex: number } {
   const cleanLog = log.replace(/\x1b\[[0-9;:]*m/g, '');
 
-  // Re-locate the sentinel each call; -1 (not found) or null => no lower bound.
+  // Re-locate the sentinel each call.
+  // - null sentinel => no lower bound (claim all).
+  // - non-null but not found => claim nothing (avoid claiming stale markers).
+  // - found => anchor after the sentinel's end.
   let fromIndex = -1;
-  if (sentinel) {
+  if (sentinel !== null) {
     const sentinelPos = cleanLog.lastIndexOf(sentinel);
-    if (sentinelPos !== -1) {
-      fromIndex = sentinelPos + sentinel.length;
+    if (sentinelPos === -1) {
+      console.warn(
+        `parseTaskCompletedIndices: sentinel "${sentinel}" not found in capture ` +
+          '(likely scrolled out of the tmux window); claiming no markers this poll.'
+      );
+      return { indices: [], lastMatchIndex: -1 };
     }
+    fromIndex = sentinelPos + sentinel.length;
   }
 
   const indices: number[] = [];
